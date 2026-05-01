@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import './styles.css';
 import {
   LocalVideoTrack,
   RemoteTrack,
@@ -86,65 +87,160 @@ function Dashboard() {
     setMessage('Connecting to all available cameras...');
   }
 
-  return (
-  <main style={{ padding: '16px', fontFamily: 'Arial, sans-serif' }}>
-    <h1>Secure CCTV Web Monitoring System</h1>
+   return (
+  <main className="web-dashboard">
+    <header className="app-navbar">
+      <div className="app-brand">
+        <div className="brand-mark">CCTV</div>
+        <div>
+          <h1>Secure CCTV Monitor</h1>
+          <p>Private live monitoring for authorized users only</p>
+        </div>
+      </div>
 
-    <p>
-      <a href="/admin/security">Open Admin Security Page</a>
-      <a href="/admin/audit-logs">Open Audit Logs</a>
-      <a href="/admin/users">Admin Users</a>
-      <a href="/admin/security-test">Security Test</a>
-    </p>
+      <nav className="top-nav">
+        <a href="/admin/security">Security</a>
+        <a href="/admin/audit-logs">Audit Logs</a>
+        <a href="/admin/users">Users</a>
+        <a href="/admin/security-test">Security Test</a>
+      </nav>
+    </header>
 
-    <p>{message}</p>
+    <section className="dashboard-layout">
+      <aside className="app-sidebar">
+        <div className="sidebar-label">Monitoring</div>
 
-      <section style={{ marginBottom: '16px' }}>
-        <button onClick={viewAllCameras}>View all cameras</button>
+        <a className="app-sidebar-item active" href="/">
+          <span className="sidebar-dot dot-cyan" />
+          All cameras
+        </a>
 
-        {cameras.map((camera) => (
-          <button
-            key={camera.id}
-            onClick={() => viewCamera(camera)}
-            style={{ marginLeft: '8px' }}
-          >
-            {camera.name} - {camera.status}
-          </button>
-        ))}
+        <button className="app-sidebar-item" onClick={viewAllCameras}>
+          <span className="sidebar-dot dot-green" />
+          View all feeds
+        </button>
+
+        <a className="app-sidebar-item" href="/admin/audit-logs">
+          <span className="sidebar-dot dot-red" />
+          Event log
+        </a>
+
+        <div className="sidebar-divider" />
+
+        <div className="sidebar-label">Administration</div>
+
+        <a className="app-sidebar-item" href="/admin/security">
+          <span className="sidebar-dot dot-cyan" />
+          Security
+        </a>
+
+        <a className="app-sidebar-item" href="/admin/users">
+          <span className="sidebar-dot dot-green" />
+          Users
+        </a>
+
+        <a className="app-sidebar-item" href="/admin/security-test">
+          <span className="sidebar-dot dot-red" />
+          Test denial
+        </a>
+      </aside>
+
+      <section className="dashboard-main">
+        <header className="page-header">
+          <div>
+            <div className="page-kicker">Private monitoring dashboard</div>
+            <h2 className="page-title">All Cameras</h2>
+            <p className="page-subtitle">
+              Live feeds are available only through authenticated Tailscale access.
+            </p>
+          </div>
+
+          <div className="header-actions">
+            <div className="search">
+              <div className="search-icon" />
+              <div className="search-text">Search cameras, events, zones…</div>
+            </div>
+
+            <div className="seg">
+              <button className="seg-btn active">Grid</button>
+              <button className="seg-btn">List</button>
+            </div>
+
+            <button className="btn-apple" onClick={viewAllCameras}>
+              View all
+            </button>
+          </div>
+        </header>
+
+        <section className="info-grid">
+          <div className="card">
+            <div className="card-title">System status</div>
+            <div className="status-line">
+              <strong>Message:</strong> {message || 'Ready'}
+            </div>
+            <div className="status-line">
+              <strong>Access:</strong> Tailscale private network
+            </div>
+            <div className="status-line">
+              <strong>Registration:</strong> Disabled
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="card-title">Security controls</div>
+            <div className="status-line">Identity headers verified</div>
+            <div className="status-line">Camera grants enforced</div>
+            <div className="status-line">Short-lived stream tokens</div>
+          </div>
+        </section>
+
+        <section className="cam-grid" aria-label="Live camera feeds">
+          {cameras.map((camera) => (
+            <article className="cam-card active" key={camera.id}>
+              <section
+                id={`video-container-${camera.id}`}
+                className="cam-feed"
+                aria-label={`${camera.name} live feed`}
+              >
+                <div className="rec-pill">
+                  <span className="live-dot" />
+                  LIVE
+                </div>
+
+                <span className="feed-placeholder">NO FEED SELECTED</span>
+              </section>
+
+              <div className="cam-meta">
+                <span className="cam-name">{camera.name}</span>
+                <span
+                  className={
+                    camera.status === 'online'
+                      ? 'badge badge-online'
+                      : 'badge badge-offline'
+                  }
+                >
+                  {camera.status}
+                </span>
+              </div>
+
+              <div className="cam-ts">{new Date().toLocaleTimeString()}</div>
+
+              <div className="cam-actions">
+                <button className="btn-apple" onClick={() => viewCamera(camera)}>
+                  View feed
+                </button>
+                <button className="btn-ghost" onClick={() => viewCamera(camera)}>
+                  Refresh
+                </button>
+              </div>
+            </article>
+          ))}
+        </section>
       </section>
+    </section>
+  </main>
+);
 
-      <section
-        aria-label="Live camera feeds"
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(2, minmax(320px, 1fr))',
-          gap: '16px'
-        }}
-      >
-        {cameras.map((camera) => (
-          <article
-            key={camera.id}
-            style={{
-              border: '1px solid #ccc',
-              padding: '8px',
-              minHeight: '280px'
-            }}
-          >
-            <h2>{camera.name}</h2>
-            <p>Status: {camera.status}</p>
-            <section
-              id={`video-container-${camera.id}`}
-              aria-label={`${camera.name} live feed`}
-              style={{
-                background: '#111',
-                minHeight: '240px'
-              }}
-            />
-          </article>
-        ))}
-      </section>
-    </main>
-  );
 }
 
 function Publisher() {
