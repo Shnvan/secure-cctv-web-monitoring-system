@@ -58,6 +58,11 @@ For the current demo, users and audit state are implemented as starter in-memory
 - Frontend-derived camera live status detection: offline, connecting, waiting, live, reconnecting, disconnected, and error.
 - Admin security page at `/admin/security`.
 - Audit logs page at `/admin/audit-logs` with hash-chain integrity status.
+- Publisher lifecycle audit events:
+  - `CAMERA_PUBLISHER_STARTED`
+  - `CAMERA_PUBLISHER_STOPPED`
+  - `CAMERA_PUBLISHER_DISCONNECTED`
+  - `CAMERA_PUBLISHER_FAILED`
 - Admin users page at `/admin/users`.
 - Simulated denied-access audit event at `/admin/security-test`.
 - GitHub Actions security workflow for backend tests, Python dependency audit, frontend dependency audit, and secret scanning.
@@ -153,11 +158,14 @@ The private URL depends on your Tailscale machine name and tailnet. Share only t
 7. Start publishing both camera feeds.
 8. On the dashboard, click one camera and show status changes from offline to connecting, waiting, and live.
 9. Click View all and show both camera feeds working independently.
-10. Open `/admin/security` and show the authenticated identity, roles, and camera grants.
-11. Open `/admin/users` and show that users are provisioned, not self-registered.
-12. Open `/admin/security-test` and generate a simulated denied-access event.
-13. Open `/admin/audit-logs`, refresh logs, and show hash-chain integrity.
-14. Stop a publisher and show the dashboard status moving away from live.
+10. Open `/admin/audit-logs`, refresh logs, and show `CAMERA_PUBLISHER_STARTED`.
+11. Stop a publisher and show the dashboard status moving away from live.
+12. Refresh audit logs and show `CAMERA_PUBLISHER_STOPPED`.
+13. If practical, close a publisher unexpectedly or trigger a publisher failure and show `CAMERA_PUBLISHER_DISCONNECTED` or `CAMERA_PUBLISHER_FAILED`.
+14. Open `/admin/security` and show the authenticated identity, roles, and camera grants.
+15. Open `/admin/users` and show that users are provisioned, not self-registered.
+16. Open `/admin/security-test` and generate a simulated denied-access event.
+17. Open `/admin/audit-logs`, refresh logs, and show hash-chain integrity.
 
 Do not show `.env`, API secrets, private keys, raw LiveKit tokens, camera credentials, or private user data during the demo.
 
@@ -172,6 +180,7 @@ Do not show `.env`, API secrets, private keys, raw LiveKit tokens, camera creden
 - Generic denial behavior to avoid revealing unnecessary details.
 - Security headers configured through Caddy.
 - Hash-chained audit log events for tamper-evidence in the demo.
+- Publisher start, stop, disconnect, and failure activity is recorded as audit events.
 - Simulated denied-access event for safe audit demonstration.
 - GitHub Actions security checks for dependencies, tests, and secret scanning.
 
@@ -213,7 +222,7 @@ Use an identity with the required admin or auditor role. The backend only allows
 
 ### Audit logs are empty
 
-Generate activity first. For example, view a camera, request a stream token, or use `/admin/security-test` to create the simulated denied-access audit event.
+Generate activity first. For example, view a camera, start or stop a publisher, request a stream token, or use `/admin/security-test` to create the simulated denied-access audit event.
 
 ### `private local configuration` is missing
 

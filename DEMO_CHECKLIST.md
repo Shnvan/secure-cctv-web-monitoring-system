@@ -53,6 +53,7 @@ tailscale serve status
 - [ ] Click Start publishing on Camera 1.
 - [ ] Click Start publishing on Camera 2.
 - [ ] Verify both publisher pages report that they are publishing.
+- [ ] Open `/admin/audit-logs` and confirm publisher start activity appears as `CAMERA_PUBLISHER_STARTED`.
 
 ## Dashboard Test Checklist
 
@@ -65,6 +66,7 @@ tailscale serve status
 - [ ] Confirm each camera card updates independently.
 - [ ] Stop or close one publisher tab.
 - [ ] Confirm the affected dashboard camera status changes away from `live`.
+- [ ] Refresh `/admin/audit-logs` and confirm a normal stop appears as `CAMERA_PUBLISHER_STOPPED`.
 
 ## Admin Security Page Test
 
@@ -79,6 +81,10 @@ tailscale serve status
 - [ ] Open `/admin/audit-logs`.
 - [ ] Confirm audit events appear after camera viewing, token requests, or security-test activity.
 - [ ] Confirm hash-chain integrity status is visible.
+- [ ] Confirm publisher start events appear as `CAMERA_PUBLISHER_STARTED`.
+- [ ] Confirm publisher stop events appear as `CAMERA_PUBLISHER_STOPPED`.
+- [ ] Confirm unexpected publisher disconnects appear as `CAMERA_PUBLISHER_DISCONNECTED` when demonstrated.
+- [ ] Confirm publisher failures appear as `CAMERA_PUBLISHER_FAILED` when demonstrated.
 - [ ] Refresh audit logs after generating a new event.
 
 ## Users Page Test
@@ -163,6 +169,7 @@ tailscale serve status
 ### Audit logs are empty
 
 - [ ] View a camera or request a stream token.
+- [ ] Start or stop a publisher, then refresh `/admin/audit-logs`.
 - [ ] Use `/admin/security-test` to generate a simulated denied-access event.
 - [ ] Refresh `/admin/audit-logs`.
 
