@@ -1,0 +1,92 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-secure_cctv}
+      POSTGRES_USER: ${POSTGRES_USER:-secure_cctv}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docs/DATABASE_SCHEMA.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    networks:
+      - app_net
+    security_opt:
+      - no-new-privileges:true
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
+      DEV_AUTH_ENABLED: ${DEV_AUTH_ENABLED:-true}
+      HIDE_AUTH_FAILURES: ${HIDE_AUTH_FAILURES:-true}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8080}
+
+      POSTGRES_DB: ${POSTGRES_DB:-secure_cctv}
+      POSTGRES_USER: ${POSTGRES_USER:-secure_cctv}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+
+      LIVEKIT_URL: ${LIVEKIT_URL:-ws://localhost:7880}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:?LIVEKIT_API_KEY is required}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:?LIVEKIT_API_SECRET is required}
+      STREAM_TOKEN_TTL_SECONDS: ${STREAM_TOKEN_TTL_SECONDS:-60}
+
+      AUDIT_HMAC_KEY: ${AUDIT_HMAC_KEY:-change-this-long-random-audit-key}
+      TRUSTED_IDENTITY_HEADER: ${TRUSTED_IDENTITY_HEADER:-x-auth-request-email}
+      TRUSTED_PROXY_SECRET: ${TRUSTED_PROXY_SECRET:-}
+      CLOUDFLARE_ACCESS_JWKS_URL: ${CLOUDFLARE_ACCESS_JWKS_URL:-}
+      CLOUDFLARE_ACCESS_AUDIENCE: ${CLOUDFLARE_ACCESS_AUDIENCE:-}
+    depends_on:
+      - postgres
+      - livekit
+    networks:
+      - app_net
+    security_opt:
+      - no-new-privileges:true
+
+  frontend:
+    build:
+      context: ./frontend
+    networks:
+      - app_net
+    security_opt:
+      - no-new-privileges:true
+
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --config /etc/livekit.yaml --node-ip ${TAILSCALE_IP:-127.0.0.1}
+    volumes:
+      - ./infra/livekit.yaml:/etc/livekit.yaml:ro
+    networks:
+      - app_net
+    ports:
+      - "${TAILSCALE_IP:-127.0.0.1}:7881:7881"
+      - "${TAILSCALE_IP:-127.0.0.1}:7882-7892:7882-7892/udp"
+    security_opt:
+      - no-new-privileges:true  
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      TRUSTED_PROXY_SECRET: ${TRUSTED_PROXY_SECRET}
+    volumes:
+      - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      - backend
+      - frontend
+      - livekit
+    networks:
+      - app_net
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  pgdata:
+
+networks:
+  app_net:
+    driver: bridge

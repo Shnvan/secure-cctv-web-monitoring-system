@@ -1,0 +1,39 @@
+:8080 {
+    encode zstd gzip
+
+    header {
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        X-Frame-Options "DENY"
+        Cache-Control "no-store"
+        Permissions-Policy "camera=(self), microphone=()"
+        Content-Security-Policy "default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://localhost:8080 ws://127.0.0.1:8080 wss://*.ts.net https://*.ts.net; media-src 'self' blob:; worker-src 'self' blob:"
+    }
+
+    handle_path /livekit/* {
+        reverse_proxy livekit:7880
+    }
+
+    handle /api/* {
+        reverse_proxy backend:8000 {
+            header_up x-internal-auth-secret {$TRUSTED_PROXY_SECRET}
+        }
+    }
+
+    handle /healthz {
+        reverse_proxy backend:8000
+    }
+
+    handle /assets/* {
+        reverse_proxy frontend:80
+    }
+
+    handle /favicon.ico {
+        reverse_proxy frontend:80
+    }
+
+    handle {
+        rewrite * /index.html
+        reverse_proxy frontend:80
+    }
+}

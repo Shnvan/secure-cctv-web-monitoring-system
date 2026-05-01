@@ -1,0 +1,21 @@
+flowchart TD
+    U[Authorized Viewer Device] --> ZT[Private Zero Trust / VPN / Identity-Aware Proxy]
+    P[Phone Camera Source] --> ZT
+    ZT --> RP[Reverse Proxy: TLS, Headers, Rate Limits]
+    RP --> FE[Frontend Static Web App]
+    FE --> API[Backend API: Identity Validation, RBAC, Token Broker]
+    API --> DB[(PostgreSQL: Users, Grants, Sessions, Audit)]
+    API --> LK[LiveKit WebRTC SFU]
+    P --> LK
+    LK --> U
+    API --> AUD[Hash-Chained Audit Events]
+
+    subgraph Future Camera Network
+        IPCAM[IP Camera / NVR / ONVIF / RTSP]
+        VLAN[Dedicated Camera VLAN]
+        RELAY[RTSP/ONVIF Ingest Relay]
+        IPCAM --> VLAN --> RELAY --> LK
+    end
+
+    ATT[Unknown Visitor / Bot / Scanner] -. blocked/no route .-> ZT
+    ATT -. no public origin .-> RP
