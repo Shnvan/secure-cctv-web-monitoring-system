@@ -32,3 +32,13 @@ class TokenResponse(BaseModel):
     room: str
     token: str
     expires_in_seconds: int
+
+
+class PublisherEventRequest(BaseModel):
+    event: Literal[
+        'publisher_started',
+        'publisher_stopped',
+        'publisher_disconnected',
+        'publisher_failed',
+    ]
+    message: str | None = None

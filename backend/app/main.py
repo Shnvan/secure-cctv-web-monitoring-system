@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .audit import audit_logger
 from .auth import get_current_principal, require_camera_grant, require_role, USERS
-from .models import Camera, Principal, TokenRequest, TokenResponse
+from .models import Camera, Principal, PublisherEventRequest, TokenRequest, TokenResponse
 from .security_headers import SecurityHeadersMiddleware
 from .settings import settings
 
@@ -155,6 +155,47 @@ def publish_token(camera_id: str, body: TokenRequest, request: Request, principa
         metadata={'room': camera.room, 'ttl_seconds': settings.stream_token_ttl_seconds, 'audio': False},
     )
     return TokenResponse(camera_id=camera.id, room=camera.room, token=token, expires_in_seconds=settings.stream_token_ttl_seconds)
+
+
+@app.post('/api/v1/cameras/{camera_id}/publisher-events')
+def publisher_event(
+    camera_id: str,
+    body: PublisherEventRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> dict[str, str]:
+    camera = CAMERAS.get(camera_id)
+    if not camera or not camera.enabled:
+        raise safe_http_error(request, HTTPException(status_code=404, detail='Not found'), 'CAMERA_PUBLISHER_EVENT_DENIED')
+    try:
+        require_camera_grant(principal, camera_id, 'publish')
+    except HTTPException as exc:
+        raise safe_http_error(request, exc, 'CAMERA_PUBLISHER_EVENT_DENIED')
+
+    action_map = {
+        'publisher_started': ('CAMERA_PUBLISHER_STARTED', 'success'),
+        'publisher_stopped': ('CAMERA_PUBLISHER_STOPPED', 'success'),
+        'publisher_disconnected': ('CAMERA_PUBLISHER_DISCONNECTED', 'success'),
+        'publisher_failed': ('CAMERA_PUBLISHER_FAILED', 'failure'),
+    }
+    action, result = action_map[body.event]
+    metadata = {'event': body.event}
+    if body.message:
+        metadata['message'] = body.message
+
+    audit_logger.log(
+        action=action,
+        result=result,
+        actor_email=principal.email,
+        actor_roles=list(principal.roles),
+        target_type='camera',
+        target_id=camera_id,
+        source_ip=client_ip(request),
+        user_agent=request.headers.get('user-agent'),
+        request_id=request.headers.get('x-request-id'),
+        metadata=metadata,
+    )
+    return {'status': 'logged', 'action': action}
 
 
 @app.get('/api/v1/admin/audit-events')

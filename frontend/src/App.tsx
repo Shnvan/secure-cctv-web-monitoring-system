@@ -488,12 +488,32 @@ function Publisher() {
   const [message, setMessage] = useState('Ready to publish.');
   const roomRef = useRef<Room | null>(null);
   const trackRef = useRef<LocalVideoTrack | null>(null);
+  const intentionalStopRef = useRef(false);
+  const hasPublishedRef = useRef(false);
 
   const params = new URLSearchParams(window.location.search);
   const cameraId = params.get('camera') || 'camera-1';
 
+  async function logPublisherEvent(
+    event: 'publisher_started' | 'publisher_stopped' | 'publisher_disconnected' | 'publisher_failed',
+    eventMessage?: string
+  ) {
+    try {
+      await apiPost<{ status: string; action: string }>(
+        `/api/v1/cameras/${encodeURIComponent(cameraId)}/publisher-events`,
+        {
+          event,
+          message: eventMessage
+        }
+      );
+    } catch (err) {
+      console.error('Publisher audit event failed:', err);
+    }
+  }
+
   async function publish() {
     try {
+      intentionalStopRef.current = false;
       setMessage('Requesting publish token...');
 
       const data = await requestToken(cameraId, 'publish');
@@ -528,7 +548,15 @@ function Publisher() {
       roomRef.current = room;
 
       room.on(RoomEvent.Disconnected, () => {
+        if (roomRef.current !== room) return;
+
         setMessage('Publisher disconnected. Keep the browser tab open and device awake.');
+        if (intentionalStopRef.current) {
+          intentionalStopRef.current = false;
+          return;
+        }
+        hasPublishedRef.current = false;
+        void logPublisherEvent('publisher_disconnected', 'LiveKit publisher room disconnected.');
       });
 
       await room.connect(livekitUrl, data.token);
@@ -537,10 +565,15 @@ function Publisher() {
 
       await room.localParticipant.publishTrack(track);
 
+      hasPublishedRef.current = true;
+      await logPublisherEvent('publisher_started', 'Publisher started sending camera video.');
+
       setMessage('Publishing. Keep this phone/browser awake and plugged in.');
     } catch (err) {
       console.error('Publishing failed:', err);
       const errorMessage = err instanceof Error ? err.message : String(err);
+      hasPublishedRef.current = false;
+      await logPublisherEvent('publisher_failed', errorMessage);
       setMessage(`Publishing failed: ${errorMessage}`);
     }
   }
@@ -553,14 +586,21 @@ function Publisher() {
     }
 
     if (roomRef.current) {
+      intentionalStopRef.current = true;
       roomRef.current.disconnect();
       roomRef.current = null;
+      intentionalStopRef.current = false;
     }
 
     const preview = document.getElementById('publisher-preview');
     if (preview) {
       preview.innerHTML = '';
     }
+
+    if (hasPublishedRef.current) {
+      void logPublisherEvent('publisher_stopped', 'Publisher stopped by user.');
+    }
+    hasPublishedRef.current = false;
 
     setMessage('Publishing stopped.');
   }
