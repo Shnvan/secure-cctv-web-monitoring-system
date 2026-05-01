@@ -411,6 +411,36 @@ button {
   color: #4ade80;
 }
 
+.badge-live {
+  background: #0d3320;
+  color: #4ade80;
+}
+
+.badge-connecting {
+  background: #123143;
+  color: #8bdcff;
+}
+
+.badge-waiting {
+  background: #3d2800;
+  color: #ffb800;
+}
+
+.badge-reconnecting {
+  background: #2f245f;
+  color: #c4b5fd;
+}
+
+.badge-disconnected {
+  background: #1e2d40;
+  color: #8b9cb3;
+}
+
+.badge-error {
+  background: #3d0a08;
+  color: #ff453a;
+}
+
 .badge-warning {
   background: #3d2800;
   color: #ffb800;
@@ -569,6 +599,14 @@ button {
   height: 6px;
   border-radius: 50%;
   background: #4ade80;
+  display: inline-block;
+}
+
+.alert-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ffb800;
   display: inline-block;
 }
 

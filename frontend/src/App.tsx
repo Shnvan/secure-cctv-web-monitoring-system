@@ -54,6 +54,15 @@ type AdminUser = {
   status: string;
 };
 
+type CameraLiveStatus =
+  | 'offline'
+  | 'connecting'
+  | 'waiting'
+  | 'live'
+  | 'reconnecting'
+  | 'disconnected'
+  | 'error';
+
 function AppShell({ activePath, children, sidebarAction }: ShellProps) {
   const sidebarItemClass = (path: string) =>
     activePath === path ? 'app-sidebar-item active' : 'app-sidebar-item';
@@ -197,7 +206,12 @@ function PermissionBadges({ permissions }: { permissions: string[] }) {
 function Dashboard() {
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [message, setMessage] = useState('');
+  const [cameraStatuses, setCameraStatuses] = useState<Record<string, CameraLiveStatus>>({});
+  const [cameraLastUpdated, setCameraLastUpdated] = useState<Record<string, string>>({});
   const roomsRef = useRef<Record<string, Room>>({});
+  const sessionIdsRef = useRef<Record<string, number>>({});
+  const videoAttachedRef = useRef<Record<string, boolean>>({});
+  const sessionCounterRef = useRef(0);
 
   useEffect(() => {
     apiGet<Camera[]>('/api/v1/cameras')
@@ -208,52 +222,159 @@ function Dashboard() {
       });
 
     return () => {
+      sessionIdsRef.current = {};
+      videoAttachedRef.current = {};
       Object.values(roomsRef.current).forEach((room) => room.disconnect());
       roomsRef.current = {};
     };
   }, []);
 
+  function setCameraStatus(cameraId: string, status: CameraLiveStatus) {
+    setCameraStatuses((current) => ({ ...current, [cameraId]: status }));
+    setCameraLastUpdated((current) => ({
+      ...current,
+      [cameraId]: new Date().toLocaleTimeString()
+    }));
+  }
+
+  function getCameraStatus(camera: Camera) {
+    return cameraStatuses[camera.id] || camera.status || 'offline';
+  }
+
+  function getCameraStatusBadgeClass(status: string) {
+    switch (status) {
+      case 'connecting':
+        return 'badge badge-connecting';
+      case 'waiting':
+        return 'badge badge-waiting';
+      case 'live':
+        return 'badge badge-live';
+      case 'reconnecting':
+        return 'badge badge-reconnecting';
+      case 'disconnected':
+        return 'badge badge-disconnected';
+      case 'error':
+        return 'badge badge-error';
+      case 'online':
+        return 'badge badge-online';
+      case 'offline':
+      default:
+        return 'badge badge-offline';
+    }
+  }
+
+  function isCurrentSession(cameraId: string, sessionId: number) {
+    return sessionIdsRef.current[cameraId] === sessionId;
+  }
+
   async function viewCamera(camera: Camera) {
+    const sessionId = sessionCounterRef.current + 1;
+    sessionCounterRef.current = sessionId;
+    sessionIdsRef.current[camera.id] = sessionId;
+    videoAttachedRef.current[camera.id] = false;
+    setCameraStatus(camera.id, 'connecting');
+
     try {
       setMessage(`Requesting view token for ${camera.name}...`);
-
-      const data = await requestToken(camera.id, 'view');
 
       if (roomsRef.current[camera.id]) {
         roomsRef.current[camera.id].disconnect();
         delete roomsRef.current[camera.id];
       }
 
+      const data = await requestToken(camera.id, 'view');
+
       const room = new Room();
       roomsRef.current[camera.id] = room;
 
       room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
-        if (track.kind === 'video') {
-          const el = track.attach();
-          el.setAttribute('autoplay', 'true');
-          el.setAttribute('playsinline', 'true');
+        if (!isCurrentSession(camera.id, sessionId)) return;
 
-          const container = document.getElementById(`video-container-${camera.id}`);
-          if (container) {
-            container.innerHTML = '';
-            container.appendChild(el);
+        if (track.kind === 'video') {
+          let attached = false;
+
+          try {
+            const el = track.attach();
+            el.setAttribute('autoplay', 'true');
+            el.setAttribute('playsinline', 'true');
+
+            const container = document.getElementById(`video-container-${camera.id}`);
+            if (container) {
+              container.innerHTML = '';
+              container.appendChild(el);
+              videoAttachedRef.current[camera.id] = true;
+              setCameraStatus(camera.id, 'live');
+              attached = true;
+            } else {
+              videoAttachedRef.current[camera.id] = false;
+              setCameraStatus(camera.id, 'error');
+            }
+          } catch (err) {
+            console.error('Video attach failed:', err);
+            videoAttachedRef.current[camera.id] = false;
+            setCameraStatus(camera.id, 'error');
           }
 
-          setMessage(`Live feed active: ${camera.name}`);
+          if (attached) {
+            setMessage(`Live feed active: ${camera.name}`);
+          }
         }
       });
 
+      room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
+        if (!isCurrentSession(camera.id, sessionId)) return;
+
+        if (track.kind === 'video') {
+          videoAttachedRef.current[camera.id] = false;
+          setCameraStatus(camera.id, 'waiting');
+          setMessage(`Video feed stopped. Waiting for ${camera.name}...`);
+        }
+      });
+
+      room.on(RoomEvent.TrackSubscriptionFailed, () => {
+        if (!isCurrentSession(camera.id, sessionId)) return;
+
+        videoAttachedRef.current[camera.id] = false;
+        setCameraStatus(camera.id, 'error');
+        setMessage(`Video subscription failed: ${camera.name}`);
+      });
+
+      room.on(RoomEvent.Reconnecting, () => {
+        if (!isCurrentSession(camera.id, sessionId)) return;
+
+        setCameraStatus(camera.id, 'reconnecting');
+        setMessage(`Reconnecting to ${camera.name}...`);
+      });
+
+      room.on(RoomEvent.Reconnected, () => {
+        if (!isCurrentSession(camera.id, sessionId)) return;
+
+        setCameraStatus(camera.id, videoAttachedRef.current[camera.id] ? 'live' : 'waiting');
+        setMessage(`Reconnected to ${camera.name}.`);
+      });
+
       room.on(RoomEvent.Disconnected, () => {
+        if (!isCurrentSession(camera.id, sessionId)) return;
+
+        videoAttachedRef.current[camera.id] = false;
+        setCameraStatus(camera.id, 'disconnected');
         setMessage(`Disconnected from ${camera.name}`);
       });
 
       setMessage(`Connecting to ${camera.name}...`);
       await room.connect(livekitUrl, data.token);
 
+      if (!isCurrentSession(camera.id, sessionId)) return;
+
+      setCameraStatus(camera.id, 'waiting');
       setMessage(`Connected to ${camera.name}. Waiting for camera feed...`);
     } catch (err) {
       console.error('View camera failed:', err);
       const errorMessage = err instanceof Error ? err.message : String(err);
+      if (isCurrentSession(camera.id, sessionId)) {
+        videoAttachedRef.current[camera.id] = false;
+        setCameraStatus(camera.id, 'error');
+      }
       setMessage(`Viewer failed: ${errorMessage}`);
     }
   }
@@ -261,9 +382,7 @@ function Dashboard() {
   async function viewAllCameras() {
     setMessage('Connecting to all available cameras...');
 
-    for (const camera of cameras) {
-      await viewCamera(camera);
-    }
+    await Promise.allSettled(cameras.map((camera) => viewCamera(camera)));
   }
 
   return (
@@ -322,44 +441,44 @@ function Dashboard() {
       </section>
 
       <section className="cam-grid" aria-label="Live camera feeds">
-        {cameras.map((camera) => (
-          <article className="cam-card active" key={camera.id}>
-            <section
-              id={`video-container-${camera.id}`}
-              className="cam-feed"
-              aria-label={`${camera.name} live feed`}
-            >
-              <div className="rec-pill">
-                <span className="live-dot" />
-                LIVE
+        {cameras.map((camera) => {
+          const status = getCameraStatus(camera);
+
+          return (
+            <article className="cam-card active" key={camera.id}>
+              <section
+                id={`video-container-${camera.id}`}
+                className="cam-feed"
+                aria-label={`${camera.name} live feed`}
+              >
+                <div className="rec-pill">
+                  <span className={status === 'live' ? 'live-dot' : 'alert-dot'} />
+                  {status === 'live' ? 'LIVE' : status.toUpperCase()}
+                </div>
+
+                <span className="feed-placeholder">NO FEED SELECTED</span>
+              </section>
+
+              <div className="cam-meta">
+                <span className="cam-name">{camera.name}</span>
+                <span className={getCameraStatusBadgeClass(status)}>{status}</span>
               </div>
 
-              <span className="feed-placeholder">NO FEED SELECTED</span>
-            </section>
+              <div className="cam-ts">
+                Last updated: {cameraLastUpdated[camera.id] || 'Not connected'}
+              </div>
 
-            <div className="cam-meta">
-              <span className="cam-name">{camera.name}</span>
-              <span
-                className={
-                  camera.status === 'online' ? 'badge badge-online' : 'badge badge-offline'
-                }
-              >
-                {camera.status}
-              </span>
-            </div>
-
-            <div className="cam-ts">{new Date().toLocaleTimeString()}</div>
-
-            <div className="cam-actions">
-              <button className="btn-primary" onClick={() => viewCamera(camera)}>
-                View feed
-              </button>
-              <button className="btn-ghost" onClick={() => viewCamera(camera)}>
-                Refresh
-              </button>
-            </div>
-          </article>
-        ))}
+              <div className="cam-actions">
+                <button className="btn-primary" onClick={() => viewCamera(camera)}>
+                  View feed
+                </button>
+                <button className="btn-ghost" onClick={() => viewCamera(camera)}>
+                  Refresh
+                </button>
+              </div>
+            </article>
+          );
+        })}
       </section>
     </AppShell>
   );
