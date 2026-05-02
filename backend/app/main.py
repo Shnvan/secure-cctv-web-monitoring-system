@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import csv
 from datetime import datetime, timedelta, timezone
 import hashlib
+from io import StringIO
 import uuid
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 from .audit import audit_logger
 from .auth import get_current_principal, require_camera_grant, require_role, USERS
@@ -32,6 +35,22 @@ CAMERAS: dict[str, Camera] = {
     'camera-1': Camera(id='camera-1', name='Camera 1 - Phone Source', room='camera-1-room', status='offline'),
     'camera-2': Camera(id='camera-2', name='Camera 2 - Phone Source', room='camera-2-room', status='offline'),
 }
+
+AUDIT_EXPORT_COLUMNS = [
+    'occurred_at',
+    'actor_email',
+    'actor_roles',
+    'action',
+    'target_type',
+    'target_id',
+    'result',
+    'reason_code',
+    'source_ip',
+    'user_agent_hash',
+    'request_id',
+    'event_hash',
+    'previous_hash',
+]
 
 
 def client_ip(request: Request) -> str | None:
@@ -205,6 +224,51 @@ def audit_events(principal: Principal = Depends(get_current_principal)) -> dict:
         'chain_valid': audit_logger.verify_chain(),
         'events': [event.__dict__ for event in audit_logger.events[-100:]],
     }
+
+
+@app.get('/api/v1/admin/audit-events/export.csv')
+def export_audit_events(request: Request, principal: Principal = Depends(get_current_principal)) -> Response:
+    require_role(principal, {'super_admin', 'security_admin'})
+
+    audit_logger.log(
+        action='AUDIT_LOG_EXPORTED',
+        result='success',
+        actor_email=principal.email,
+        actor_roles=list(principal.roles),
+        target_type='audit_log',
+        target_id='export.csv',
+        source_ip=client_ip(request),
+        user_agent=request.headers.get('user-agent'),
+        request_id=request.headers.get('x-request-id'),
+    )
+
+    output = StringIO()
+    writer = csv.DictWriter(output, fieldnames=AUDIT_EXPORT_COLUMNS)
+    writer.writeheader()
+    for event in audit_logger.events:
+        writer.writerow(
+            {
+                'occurred_at': event.occurred_at,
+                'actor_email': event.actor_email,
+                'actor_roles': ';'.join(event.actor_roles),
+                'action': event.action,
+                'target_type': event.target_type,
+                'target_id': event.target_id,
+                'result': event.result,
+                'reason_code': event.reason_code,
+                'source_ip': event.source_ip,
+                'user_agent_hash': event.user_agent_hash,
+                'request_id': event.request_id,
+                'event_hash': event.event_hash,
+                'previous_hash': event.previous_hash,
+            }
+        )
+
+    return Response(
+        content=output.getvalue(),
+        media_type='text/csv',
+        headers={'Content-Disposition': 'attachment; filename="audit-events.csv"'},
+    )
 
 
 @app.get('/api/v1/admin/users')

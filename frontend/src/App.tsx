@@ -755,6 +755,7 @@ function AuditLogsPage() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [chainValid, setChainValid] = useState<boolean | null>(null);
   const [message, setMessage] = useState('Loading audit logs...');
+  const [exportMessage, setExportMessage] = useState('');
 
   async function loadAuditEvents() {
     try {
@@ -775,6 +776,43 @@ function AuditLogsPage() {
     }
   }
 
+  async function exportAuditEvents() {
+    let objectUrl = '';
+    let anchor: HTMLAnchorElement | null = null;
+
+    try {
+      setExportMessage('');
+
+      const response = await fetch('/api/v1/admin/audit-events/export.csv', {
+        credentials: 'include'
+      });
+
+      if (!response.ok) {
+        throw new Error(`Export failed: ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      objectUrl = URL.createObjectURL(blob);
+      anchor = document.createElement('a');
+      anchor.href = objectUrl;
+      anchor.download = 'audit-events.csv';
+      anchor.style.display = 'none';
+      document.body.appendChild(anchor);
+      anchor.click();
+    } catch (err) {
+      console.error('Audit log export failed:', err);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      setExportMessage(`Unable to export audit logs: ${errorMessage}`);
+    } finally {
+      if (anchor) {
+        anchor.remove();
+      }
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    }
+  }
+
   useEffect(() => {
     loadAuditEvents();
   }, []);
@@ -786,9 +824,14 @@ function AuditLogsPage() {
         title="Audit Logs"
         subtitle="Recent authorization, stream-token, and administrative security events."
         actions={
-          <button className="btn-primary" onClick={loadAuditEvents}>
-            Refresh audit logs
-          </button>
+          <>
+            <button className="btn-ghost" onClick={exportAuditEvents}>
+              Export CSV
+            </button>
+            <button className="btn-primary" onClick={loadAuditEvents}>
+              Refresh audit logs
+            </button>
+          </>
         }
       />
 
@@ -811,6 +854,7 @@ function AuditLogsPage() {
         </div>
 
         {message && <StatusMessage>{message}</StatusMessage>}
+        {exportMessage && <StatusMessage>{exportMessage}</StatusMessage>}
 
         {!message && events.length === 0 && <StatusMessage>No audit events yet.</StatusMessage>}
 
