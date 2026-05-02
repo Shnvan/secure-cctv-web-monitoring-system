@@ -385,6 +385,31 @@ button {
   outline-offset: 0;
 }
 
+.demo-status-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(130px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.demo-status-card {
+  min-height: 96px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.demo-camera-grid {
+  margin-top: 12px;
+}
+
+.demo-script-list {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 8px;
+}
+
 .section-heading {
   display: flex;
   align-items: flex-start;
@@ -763,6 +788,7 @@ button {
 
   .info-grid,
   .publisher-grid,
+  .demo-status-grid,
   .cam-grid {
     grid-template-columns: 1fr;
   }

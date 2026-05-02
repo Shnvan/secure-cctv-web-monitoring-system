@@ -84,6 +84,9 @@ function AppShell({ activePath, children, sidebarAction }: ShellProps) {
           <a className={activePath === '/' ? 'active' : ''} href="/">
             Dashboard
           </a>
+          <a className={activePath === '/demo' ? 'active' : ''} href="/demo">
+            Demo
+          </a>
           <a className={activePath === '/admin/security' ? 'active' : ''} href="/admin/security">
             Security
           </a>
@@ -112,6 +115,11 @@ function AppShell({ activePath, children, sidebarAction }: ShellProps) {
           </a>
 
           {sidebarAction}
+
+          <a className={sidebarItemClass('/demo')} href="/demo">
+            <span className="sidebar-dot dot-cyan" />
+            Demo mode
+          </a>
 
           <a className={sidebarItemClass('/publisher')} href="/publisher?camera=camera-1">
             <span className="sidebar-dot dot-green" />
@@ -205,7 +213,29 @@ function PermissionBadges({ permissions }: { permissions: string[] }) {
   );
 }
 
-function Dashboard() {
+function getCameraStatusBadgeClass(status: string) {
+  switch (status) {
+    case 'connecting':
+      return 'badge badge-connecting';
+    case 'waiting':
+      return 'badge badge-waiting';
+    case 'live':
+      return 'badge badge-live';
+    case 'reconnecting':
+      return 'badge badge-reconnecting';
+    case 'disconnected':
+      return 'badge badge-disconnected';
+    case 'error':
+      return 'badge badge-error';
+    case 'online':
+      return 'badge badge-online';
+    case 'offline':
+    default:
+      return 'badge badge-offline';
+  }
+}
+
+function useCameraViewer() {
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [message, setMessage] = useState('');
   const [cameraStatuses, setCameraStatuses] = useState<Record<string, CameraLiveStatus>>({});
@@ -241,28 +271,6 @@ function Dashboard() {
 
   function getCameraStatus(camera: Camera) {
     return cameraStatuses[camera.id] || camera.status || 'offline';
-  }
-
-  function getCameraStatusBadgeClass(status: string) {
-    switch (status) {
-      case 'connecting':
-        return 'badge badge-connecting';
-      case 'waiting':
-        return 'badge badge-waiting';
-      case 'live':
-        return 'badge badge-live';
-      case 'reconnecting':
-        return 'badge badge-reconnecting';
-      case 'disconnected':
-        return 'badge badge-disconnected';
-      case 'error':
-        return 'badge badge-error';
-      case 'online':
-        return 'badge badge-online';
-      case 'offline':
-      default:
-        return 'badge badge-offline';
-    }
   }
 
   function isCurrentSession(cameraId: string, sessionId: number) {
@@ -387,6 +395,20 @@ function Dashboard() {
     await Promise.allSettled(cameras.map((camera) => viewCamera(camera)));
   }
 
+  return {
+    cameras,
+    message,
+    cameraLastUpdated,
+    getCameraStatus,
+    viewCamera,
+    viewAllCameras
+  };
+}
+
+function Dashboard() {
+  const { cameras, message, cameraLastUpdated, getCameraStatus, viewCamera, viewAllCameras } =
+    useCameraViewer();
+
   return (
     <AppShell
       activePath="/"
@@ -481,6 +503,264 @@ function Dashboard() {
             </article>
           );
         })}
+      </section>
+    </AppShell>
+  );
+}
+
+function DemoPage() {
+  const { cameras, message, cameraLastUpdated, getCameraStatus, viewCamera, viewAllCameras } =
+    useCameraViewer();
+  const [user, setUser] = useState<AuthenticatedUser | null>(null);
+  const [userMessage, setUserMessage] = useState('Loading authenticated user...');
+  const [recentEvents, setRecentEvents] = useState<AuditEvent[]>([]);
+  const [chainValid, setChainValid] = useState<boolean | null>(null);
+  const [auditMessage, setAuditMessage] = useState('Loading recent audit events...');
+
+  useEffect(() => {
+    apiGet<AuthenticatedUser>('/api/v1/me')
+      .then((data) => {
+        setUser(data);
+        setUserMessage('');
+      })
+      .catch((err) => {
+        console.error('Demo user load failed:', err);
+        setUserMessage('Unable to load authenticated user.');
+      });
+
+    apiGet<{
+      chain_valid: boolean;
+      events: AuditEvent[];
+    }>('/api/v1/admin/audit-events')
+      .then((data) => {
+        setChainValid(data.chain_valid);
+        setRecentEvents([...data.events].reverse().slice(0, 8));
+        setAuditMessage('');
+      })
+      .catch((err) => {
+        console.error('Demo audit load failed:', err);
+        setAuditMessage('Recent audit events are available to authorized audit/admin roles only.');
+      });
+  }, []);
+
+  const securityStatus = [
+    ['Private access', 'Tailscale Serve', 'badge-online'],
+    ['Public registration', 'disabled', 'badge-offline'],
+    ['Identity', 'verified', 'badge-online'],
+    ['Camera grants', 'enforced', 'badge-online'],
+    ['Stream tokens', 'short-lived', 'badge-info'],
+    ['Audit log integrity', 'hash-chain enabled', chainValid === false ? 'badge-alert' : 'badge-online']
+  ];
+
+  return (
+    <AppShell
+      activePath="/demo"
+      sidebarAction={
+        <button className="app-sidebar-item" onClick={viewAllCameras}>
+          <span className="sidebar-dot dot-green" />
+          Start demo view
+        </button>
+      }
+    >
+      <PageHeader
+        kicker="Presentation"
+        title="Secure CCTV Demo Mode"
+        subtitle="Private authenticated monitoring demo"
+        actions={
+          <>
+            <a className="btn-ghost" href="/">
+              Dashboard
+            </a>
+            <a className="btn-ghost" href="/admin/audit-logs">
+              Audit Logs
+            </a>
+            <a className="btn-ghost" href="/admin/users">
+              Users
+            </a>
+            <a className="btn-ghost" href="/admin/security">
+              Security
+            </a>
+          </>
+        }
+      />
+
+      <section className="demo-status-grid" aria-label="Security status">
+        {securityStatus.map(([label, value, badgeClass]) => (
+          <div className="admin-card demo-status-card" key={label}>
+            <div className="card-title">{label}</div>
+            <span className={`badge ${badgeClass}`}>{value}</span>
+          </div>
+        ))}
+      </section>
+
+      <section className="info-grid">
+        <div className="admin-card">
+          <div className="card-title">Authenticated User</div>
+          {userMessage && <StatusMessage>{userMessage}</StatusMessage>}
+
+          {user && (
+            <div className="detail-list">
+              <div>
+                <span>Email</span>
+                <strong>{user.email}</strong>
+              </div>
+              <div>
+                <span>Roles</span>
+                <RoleBadges roles={user.roles} />
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="admin-card">
+          <div className="card-title">Camera Grants</div>
+          {user && Object.keys(user.camera_grants || {}).length === 0 && (
+            <StatusMessage>No camera grants assigned.</StatusMessage>
+          )}
+
+          {user && Object.keys(user.camera_grants || {}).length > 0 && (
+            <div className="grant-list">
+              {Object.entries(user.camera_grants || {}).map(([cameraId, permissions]) => (
+                <div className="grant-row" key={cameraId}>
+                  <strong>{cameraId}</strong>
+                  <PermissionBadges permissions={permissions} />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="admin-card">
+        <div className="section-heading">
+          <div>
+            <h3>Live Camera Demo</h3>
+            <p>{message || 'Ready to connect both authorized camera feeds.'}</p>
+          </div>
+          <button className="btn-primary" onClick={viewAllCameras}>
+            Start demo view
+          </button>
+        </div>
+
+        {cameras.length === 0 && <StatusMessage>No authorized cameras are available.</StatusMessage>}
+
+        {cameras.length > 0 && (
+          <section className="cam-grid demo-camera-grid" aria-label="Demo live camera feeds">
+            {cameras.map((camera) => {
+              const status = getCameraStatus(camera);
+
+              return (
+                <article className="cam-card active" key={camera.id}>
+                  <section
+                    id={`video-container-${camera.id}`}
+                    className="cam-feed"
+                    aria-label={`${camera.name} live feed`}
+                  >
+                    <div className="rec-pill">
+                      <span className={status === 'live' ? 'live-dot' : 'alert-dot'} />
+                      {status === 'live' ? 'LIVE' : status.toUpperCase()}
+                    </div>
+
+                    <span className="feed-placeholder">NO FEED SELECTED</span>
+                  </section>
+
+                  <div className="cam-meta">
+                    <span className="cam-name">{camera.name}</span>
+                    <span className={getCameraStatusBadgeClass(status)}>{status}</span>
+                  </div>
+
+                  <div className="cam-ts">
+                    Last updated: {cameraLastUpdated[camera.id] || 'Not connected'}
+                  </div>
+
+                  <div className="cam-actions">
+                    <button className="btn-primary" onClick={() => viewCamera(camera)}>
+                      View feed
+                    </button>
+                    <button className="btn-ghost" onClick={() => viewCamera(camera)}>
+                      Refresh
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </section>
+        )}
+      </section>
+
+      <section className="admin-card">
+        <div className="section-heading">
+          <div>
+            <h3>Recent Audit Events</h3>
+            <p>
+              Hash chain status:{' '}
+              {chainValid === null ? 'unavailable' : chainValid ? 'valid' : 'invalid'}
+            </p>
+          </div>
+          <a className="btn-ghost" href="/admin/audit-logs">
+            Full Audit Logs
+          </a>
+        </div>
+
+        {auditMessage && <StatusMessage>{auditMessage}</StatusMessage>}
+
+        {!auditMessage && recentEvents.length === 0 && (
+          <StatusMessage>No recent audit events yet.</StatusMessage>
+        )}
+
+        {!auditMessage && recentEvents.length > 0 && (
+          <div className="admin-table-wrap">
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Action</th>
+                  <th>Result</th>
+                  <th>Actor</th>
+                  <th>Target</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {recentEvents.map((event) => (
+                  <tr key={event.id}>
+                    <td>{new Date(event.occurred_at).toLocaleString()}</td>
+                    <td>{event.action}</td>
+                    <td>
+                      <span
+                        className={
+                          event.result.toLowerCase() === 'success'
+                            ? 'badge badge-online'
+                            : 'badge badge-alert'
+                        }
+                      >
+                        {event.result}
+                      </span>
+                    </td>
+                    <td>{event.actor_email || 'unknown'}</td>
+                    <td>
+                      {event.target_type || '-'}
+                      {event.target_id ? `: ${event.target_id}` : ''}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="admin-card">
+        <div className="card-title">Demo Script</div>
+        <ol className="demo-script-list">
+          <li>Show unauthorized non-Tailscale device cannot access.</li>
+          <li>Show authenticated Tailscale device can access.</li>
+          <li>Start camera-1 publisher.</li>
+          <li>Start camera-2 publisher.</li>
+          <li>Click Start demo view.</li>
+          <li>Show audit events and hash-chain validity.</li>
+          <li>Show users are provisioned, no public registration.</li>
+        </ol>
       </section>
     </AppShell>
   );
@@ -1220,6 +1500,10 @@ function SecurityTestPage() {
 function App() {
   if (window.location.pathname.startsWith('/publisher')) {
     return <Publisher />;
+  }
+
+  if (window.location.pathname.startsWith('/demo')) {
+    return <DemoPage />;
   }
 
   if (window.location.pathname.startsWith('/admin/security-test')) {
