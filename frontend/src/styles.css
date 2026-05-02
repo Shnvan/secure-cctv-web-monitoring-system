@@ -340,6 +340,51 @@ button {
   font-size: 14px;
 }
 
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.filter-control {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.filter-control span {
+  color: #8b9cb3;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.filter-control input,
+.filter-control select {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  border-radius: 8px;
+  border: 0.5px solid #2a3f57;
+  background: #0a0f18;
+  color: #e8edf4;
+  font: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+}
+
+.filter-control input::placeholder {
+  color: #4e6072;
+}
+
+.filter-control input:focus,
+.filter-control select:focus {
+  border-color: #00c2ff;
+  outline: 2px solid rgba(0, 194, 255, 0.18);
+  outline-offset: 0;
+}
+
 .section-heading {
   display: flex;
   align-items: flex-start;

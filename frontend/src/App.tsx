@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 import {
@@ -62,6 +62,8 @@ type CameraLiveStatus =
   | 'reconnecting'
   | 'disconnected'
   | 'error';
+
+type AuditResultFilter = 'all' | 'success' | 'denied' | 'failure';
 
 function AppShell({ activePath, children, sidebarAction }: ShellProps) {
   const sidebarItemClass = (path: string) =>
@@ -756,6 +758,63 @@ function AuditLogsPage() {
   const [chainValid, setChainValid] = useState<boolean | null>(null);
   const [message, setMessage] = useState('Loading audit logs...');
   const [exportMessage, setExportMessage] = useState('');
+  const [searchText, setSearchText] = useState('');
+  const [actionFilter, setActionFilter] = useState('all');
+  const [resultFilter, setResultFilter] = useState<AuditResultFilter>('all');
+  const [actorFilter, setActorFilter] = useState('all');
+  const [targetCameraFilter, setTargetCameraFilter] = useState('all');
+
+  const actionOptions = useMemo(
+    () => Array.from(new Set(events.map((event) => event.action))).sort(),
+    [events]
+  );
+  const actorOptions = useMemo(
+    () =>
+      Array.from(new Set(events.map((event) => event.actor_email).filter(Boolean) as string[])).sort(),
+    [events]
+  );
+  const targetCameraOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          events
+            .filter((event) => event.target_type === 'camera' && event.target_id)
+            .map((event) => event.target_id as string)
+        )
+      ).sort(),
+    [events]
+  );
+
+  const filteredEvents = useMemo(() => {
+    const normalizedSearch = searchText.trim().toLowerCase();
+
+    return events.filter((event) => {
+      const searchableFields = [
+        event.action,
+        event.actor_email,
+        event.target_type,
+        event.target_id,
+        event.result,
+        event.reason_code,
+        event.source_ip,
+        event.request_id,
+        event.event_hash,
+        event.previous_hash
+      ];
+      const matchesSearch =
+        !normalizedSearch ||
+        searchableFields.some((field) => (field || '').toLowerCase().includes(normalizedSearch));
+      const matchesAction = actionFilter === 'all' || event.action === actionFilter;
+      const matchesResult =
+        resultFilter === 'all' || event.result.toLowerCase() === resultFilter;
+      const matchesActor = actorFilter === 'all' || event.actor_email === actorFilter;
+      const matchesTargetCamera =
+        targetCameraFilter === 'all' ||
+        (event.target_type === 'camera' && event.target_id === targetCameraFilter);
+
+      return matchesSearch && matchesAction && matchesResult && matchesActor && matchesTargetCamera;
+    });
+  }, [actionFilter, actorFilter, events, resultFilter, searchText, targetCameraFilter]);
 
   async function loadAuditEvents() {
     try {
@@ -817,6 +876,14 @@ function AuditLogsPage() {
     loadAuditEvents();
   }, []);
 
+  function clearAuditFilters() {
+    setSearchText('');
+    setActionFilter('all');
+    setResultFilter('all');
+    setActorFilter('all');
+    setTargetCameraFilter('all');
+  }
+
   return (
     <AppShell activePath="/admin/audit-logs">
       <PageHeader
@@ -849,16 +916,97 @@ function AuditLogsPage() {
 
       <section className="admin-card">
         <div className="section-heading">
+          <div>
+            <div className="card-title">Filters</div>
+            <p>Showing {filteredEvents.length} of {events.length} events</p>
+          </div>
+          <button className="btn-ghost" onClick={clearAuditFilters}>
+            Clear Filters
+          </button>
+        </div>
+
+        <div className="filter-grid">
+          <label className="filter-control">
+            <span>Search</span>
+            <input
+              type="search"
+              value={searchText}
+              onChange={(event) => setSearchText(event.target.value)}
+              placeholder="Action, actor, target, request ID"
+            />
+          </label>
+
+          <label className="filter-control">
+            <span>Action</span>
+            <select value={actionFilter} onChange={(event) => setActionFilter(event.target.value)}>
+              <option value="all">All actions</option>
+              {actionOptions.map((action) => (
+                <option key={action} value={action}>
+                  {action}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="filter-control">
+            <span>Result</span>
+            <select
+              value={resultFilter}
+              onChange={(event) => setResultFilter(event.target.value as AuditResultFilter)}
+            >
+              <option value="all">All results</option>
+              <option value="success">Success</option>
+              <option value="denied">Denied</option>
+              <option value="failure">Failure</option>
+            </select>
+          </label>
+
+          <label className="filter-control">
+            <span>Actor Email</span>
+            <select value={actorFilter} onChange={(event) => setActorFilter(event.target.value)}>
+              <option value="all">All actors</option>
+              {actorOptions.map((actorEmail) => (
+                <option key={actorEmail} value={actorEmail}>
+                  {actorEmail}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="filter-control">
+            <span>Target Camera</span>
+            <select
+              value={targetCameraFilter}
+              onChange={(event) => setTargetCameraFilter(event.target.value)}
+            >
+              <option value="all">All cameras</option>
+              {targetCameraOptions.map((cameraId) => (
+                <option key={cameraId} value={cameraId}>
+                  {cameraId}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section className="admin-card">
+        <div className="section-heading">
           <h3>Recent Security Events</h3>
-          <span className="badge badge-info">{events.length} events</span>
+          <span className="badge badge-info">
+            Showing {filteredEvents.length} of {events.length} events
+          </span>
         </div>
 
         {message && <StatusMessage>{message}</StatusMessage>}
         {exportMessage && <StatusMessage>{exportMessage}</StatusMessage>}
 
         {!message && events.length === 0 && <StatusMessage>No audit events yet.</StatusMessage>}
+        {!message && events.length > 0 && filteredEvents.length === 0 && (
+          <StatusMessage>No audit events match the current filters.</StatusMessage>
+        )}
 
-        {!message && events.length > 0 && (
+        {!message && filteredEvents.length > 0 && (
           <div className="admin-table-wrap">
             <table className="admin-table">
               <thead>
@@ -874,7 +1022,7 @@ function AuditLogsPage() {
               </thead>
 
               <tbody>
-                {events.map((event) => (
+                {filteredEvents.map((event) => (
                   <tr key={event.id}>
                     <td>{new Date(event.occurred_at).toLocaleString()}</td>
                     <td>{event.action}</td>
