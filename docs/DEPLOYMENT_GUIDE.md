@@ -9,12 +9,13 @@
    - Option B: Cloudflare Zero Trust private network / Access.
    - Option C: institutional VPN.
 4. Do not open public inbound firewall ports.
-5. Copy `private local configuration` to `.env` and replace every secret.
-6. Start services with `docker compose up --build`.
-7. Configure private DNS or private hostname.
-8. Disable `DEV_AUTH_ENABLED` before demo.
-9. Configure real identity assertion validation.
-10. Run the pentest checklist.
+5. Create a local `.env` from private deployment values.
+6. Create a local `infra/livekit.yaml` with LiveKit key settings that match the private local environment.
+7. Start services with `docker compose up --build`.
+8. Configure private DNS or private hostname.
+9. Disable `DEV_AUTH_ENABLED` before demo.
+10. Configure real identity assertion validation.
+11. Run the pentest checklist.
 
 ## Firewall rules
 

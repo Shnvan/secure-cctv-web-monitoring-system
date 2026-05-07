@@ -32,5 +32,14 @@ class Settings(BaseSettings):
     rate_limit_window_seconds: int = 60
     rate_limit_max_requests: int = 60
 
+    # AI processing settings
+    ai_enabled: bool = True
+    ai_fps: int = 15  # FIX: BUG-07 — surveillance baseline
+    ai_yolo_model: str = 'yolov8n'
+    ai_confidence_threshold: float = 0.5
+    ai_face_model: str = 'SFace'
+    ai_loitering_threshold_seconds: int = 30
+    known_faces_dir: str = 'known_faces'
+
 
 settings = Settings()

@@ -38,9 +38,19 @@ services:
       TRUSTED_PROXY_SECRET: ${TRUSTED_PROXY_SECRET:?TRUSTED_PROXY_SECRET is required}
       CLOUDFLARE_ACCESS_JWKS_URL: ${CLOUDFLARE_ACCESS_JWKS_URL:-}
       CLOUDFLARE_ACCESS_AUDIENCE: ${CLOUDFLARE_ACCESS_AUDIENCE:-}
+
+      AI_ENABLED: ${AI_ENABLED:-true}
+      AI_FPS: ${AI_FPS:-3}
+      AI_YOLO_MODEL: ${AI_YOLO_MODEL:-yolov8n}
+      AI_CONFIDENCE_THRESHOLD: ${AI_CONFIDENCE_THRESHOLD:-0.5}
+      AI_FACE_MODEL: ${AI_FACE_MODEL:-SFace}
+      AI_LOITERING_THRESHOLD_SECONDS: ${AI_LOITERING_THRESHOLD_SECONDS:-30}
+      KNOWN_FACES_DIR: /app/known_faces
     depends_on:
       - postgres
       - livekit
+    volumes:
+      - ./backend/known_faces:/app/known_faces
     networks:
       - app_net
     security_opt:

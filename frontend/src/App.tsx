@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Component, useEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 import {
@@ -9,7 +9,7 @@ import {
   VideoPresets,
   createLocalVideoTrack
 } from 'livekit-client';
-import { apiGet, apiPost, requestToken, Camera } from './api';
+import { apiGet, apiPost, apiDelete, requestToken, Camera, connectAIWebSocket, getKnownFaces, uploadKnownFace, deleteKnownFace, getAISettings, updateAISettings, type AIFrameResult, type AISettingsData, type KnownFace } from './api';
 
 const livekitUrl =
   import.meta.env.VITE_LIVEKIT_URL ||
@@ -64,6 +64,68 @@ type CameraLiveStatus =
   | 'error';
 
 type AuditResultFilter = 'all' | 'success' | 'denied' | 'failure';
+
+type ErrorBoundaryState = {
+  hasError: boolean;
+  message: string;
+};
+
+class AppErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryState> {
+  state: ErrorBoundaryState = {
+    hasError: false,
+    message: ''
+  };
+
+  static getDerivedStateFromError(error: unknown): ErrorBoundaryState {
+    return {
+      hasError: true,
+      message: error instanceof Error ? error.message : 'Unexpected dashboard error'
+    };
+  }
+
+  componentDidCatch(error: unknown, errorInfo: ErrorInfo) {
+    console.error('Dashboard render failed:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <main className="web-dashboard">
+          <section className="dashboard-main">
+            <section className="admin-card">
+              <div className="card-title">Dashboard error</div>
+              <p>The live dashboard hit a recoverable display error.</p>
+              <StatusMessage>{this.state.message}</StatusMessage>
+              <div className="button-row">
+                <button className="btn-primary" onClick={() => window.location.reload()}>
+                  Reload dashboard
+                </button>
+              </div>
+            </section>
+          </section>
+        </main>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+function getCameraVideoMount(cameraId: string) {
+  return document.getElementById(`video-mount-${cameraId}`);
+}
+
+function clearCameraVideoMount(cameraId: string) {
+  getCameraVideoMount(cameraId)?.replaceChildren();
+}
+
+function getPublisherVideoMount() {
+  return document.getElementById('publisher-video-mount');
+}
+
+function clearPublisherVideoMount() {
+  getPublisherVideoMount()?.replaceChildren();
+}
 
 function AppShell({ activePath, children, sidebarAction }: ShellProps) {
   const sidebarItemClass = (path: string) =>
@@ -240,6 +302,7 @@ function useCameraViewer() {
   const [message, setMessage] = useState('');
   const [cameraStatuses, setCameraStatuses] = useState<Record<string, CameraLiveStatus>>({});
   const [cameraLastUpdated, setCameraLastUpdated] = useState<Record<string, string>>({});
+  const [activeCameraIds, setActiveCameraIds] = useState<string[]>([]);
   const roomsRef = useRef<Record<string, Room>>({});
   const sessionIdsRef = useRef<Record<string, number>>({});
   const videoAttachedRef = useRef<Record<string, boolean>>({});
@@ -256,6 +319,7 @@ function useCameraViewer() {
     return () => {
       sessionIdsRef.current = {};
       videoAttachedRef.current = {};
+      Object.keys(roomsRef.current).forEach(clearCameraVideoMount);
       Object.values(roomsRef.current).forEach((room) => room.disconnect());
       roomsRef.current = {};
     };
@@ -282,6 +346,10 @@ function useCameraViewer() {
     sessionCounterRef.current = sessionId;
     sessionIdsRef.current[camera.id] = sessionId;
     videoAttachedRef.current[camera.id] = false;
+    setActiveCameraIds((current) =>
+      current.includes(camera.id) ? current : [...current, camera.id]
+    );
+    clearCameraVideoMount(camera.id);
     setCameraStatus(camera.id, 'connecting');
 
     try {
@@ -308,10 +376,9 @@ function useCameraViewer() {
             el.setAttribute('autoplay', 'true');
             el.setAttribute('playsinline', 'true');
 
-            const container = document.getElementById(`video-container-${camera.id}`);
-            if (container) {
-              container.innerHTML = '';
-              container.appendChild(el);
+            const mount = getCameraVideoMount(camera.id);
+            if (mount) {
+              mount.replaceChildren(el);
               videoAttachedRef.current[camera.id] = true;
               setCameraStatus(camera.id, 'live');
               attached = true;
@@ -335,6 +402,8 @@ function useCameraViewer() {
         if (!isCurrentSession(camera.id, sessionId)) return;
 
         if (track.kind === 'video') {
+          track.detach().forEach((el) => el.remove());
+          clearCameraVideoMount(camera.id);
           videoAttachedRef.current[camera.id] = false;
           setCameraStatus(camera.id, 'waiting');
           setMessage(`Video feed stopped. Waiting for ${camera.name}...`);
@@ -367,6 +436,8 @@ function useCameraViewer() {
         if (!isCurrentSession(camera.id, sessionId)) return;
 
         videoAttachedRef.current[camera.id] = false;
+        clearCameraVideoMount(camera.id);
+        setActiveCameraIds((current) => current.filter((id) => id !== camera.id));
         setCameraStatus(camera.id, 'disconnected');
         setMessage(`Disconnected from ${camera.name}`);
       });
@@ -383,6 +454,8 @@ function useCameraViewer() {
       const errorMessage = err instanceof Error ? err.message : String(err);
       if (isCurrentSession(camera.id, sessionId)) {
         videoAttachedRef.current[camera.id] = false;
+        clearCameraVideoMount(camera.id);
+        setActiveCameraIds((current) => current.filter((id) => id !== camera.id));
         setCameraStatus(camera.id, 'error');
       }
       setMessage(`Viewer failed: ${errorMessage}`);
@@ -399,15 +472,683 @@ function useCameraViewer() {
     cameras,
     message,
     cameraLastUpdated,
+    activeCameraIds,
     getCameraStatus,
     viewCamera,
     viewAllCameras
   };
 }
 
+// ---- AI Detection Hook ----
+
+type SmartEvent = {
+  id: string;
+  text: string;
+  severity: 'normal' | 'warning' | 'critical';
+  timestamp: number;
+  type: 'detection' | 'face' | 'alert';
+};
+
+function useAIDetection(cameraId: string, enabled: boolean, fps: number) {
+  const [result, setResult] = useState<AIFrameResult | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [smartEvents, setSmartEvents] = useState<SmartEvent[]>([]);
+  const wsRef = useRef<WebSocket | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const inFlightRef = useRef(false);
+
+  function addSmartEvents(descriptions: string[]) {
+    if (descriptions.length === 0) return;
+
+    const newEvents: SmartEvent[] = descriptions.map((text, i) => {
+      let severity: SmartEvent['severity'] = 'normal';
+      let type: SmartEvent['type'] = 'detection';
+      if (text.includes('ðŸš¨') || text.includes('FIGHTING') || text.includes('FALL')) {
+        severity = 'critical';
+        type = 'alert';
+      } else if (text.includes('âš ï¸') || text.includes('loitering') || text.includes('unavailable')) {
+        severity = 'warning';
+        type = 'alert';
+      } else if (text.includes('Known person') || text.includes('Unknown person')) {
+        type = 'face';
+      }
+      return { id: `${Date.now()}-${i}`, text, severity, timestamp: Date.now(), type };
+    });
+
+    setSmartEvents((prev) => [...newEvents, ...prev].slice(0, 100));
+  }
+
+  function normalizeAIResult(raw: Partial<AIFrameResult> | null | undefined): AIFrameResult {
+    return {
+      detections: Array.isArray(raw?.detections) ? raw.detections : [],
+      poses: Array.isArray(raw?.poses) ? raw.poses.filter(Array.isArray) : [],
+      pose_classifications: Array.isArray(raw?.pose_classifications) ? raw.pose_classifications : [],
+      faces: Array.isArray(raw?.faces) ? raw.faces : [],
+      alerts: Array.isArray(raw?.alerts) ? raw.alerts : [],
+      descriptions: Array.isArray(raw?.descriptions)
+        ? raw.descriptions.filter((text): text is string => typeof text === 'string')
+        : [],
+      pose_connections: Array.isArray(raw?.pose_connections) ? raw.pose_connections : [],
+      timestamp: typeof raw?.timestamp === 'number' ? raw.timestamp : Date.now() / 1000,
+      camera_id: typeof raw?.camera_id === 'string' && raw.camera_id ? raw.camera_id : cameraId,
+      processing_ms: typeof raw?.processing_ms === 'number' ? raw.processing_ms : 0,
+      frame_width: typeof raw?.frame_width === 'number' ? raw.frame_width : 0,
+      frame_height: typeof raw?.frame_height === 'number' ? raw.frame_height : 0,
+      timings_ms: raw?.timings_ms && typeof raw.timings_ms === 'object' ? raw.timings_ms : {},
+      ai_fps: typeof raw?.ai_fps === 'number' ? raw.ai_fps : 0,
+      person_count: typeof raw?.person_count === 'number' ? raw.person_count : 0,
+      model: typeof raw?.model === 'string' ? raw.model : undefined,
+      motion: typeof raw?.motion === 'boolean' ? raw.motion : undefined,
+      skipped: raw?.skipped === true,
+      error: typeof raw?.error === 'string' ? raw.error : undefined
+    };
+  }
+
+  useEffect(() => {
+    if (!enabled || !cameraId) {
+      setIsProcessing(false);
+      setErrorMessage('');
+      return;
+    }
+
+    const ws = connectAIWebSocket(cameraId);
+    wsRef.current = ws;
+    setErrorMessage('');
+    inFlightRef.current = false;
+
+    ws.onopen = () => {
+      setIsProcessing(true);
+      // Start capturing frames — reuse a single offscreen canvas
+      const offscreen = document.createElement('canvas');
+      const MAX_HEIGHT = 480; // downscale to 480p for speed
+      // FIX: BUG-07 — internal clamp bumped 10 → 30 so the slider's new max
+      // actually reaches the capture loop.
+      const targetFps = Math.max(1, Math.min(30, Math.round(fps || 15)));
+      const frameIntervalMs = 1000 / targetFps;
+      // FIX: BUG-09 — if a frame is in flight longer than this, we assume the
+      // server response was lost / dropped and reset inFlight so capture resumes.
+      const INFLIGHT_WATCHDOG_MS = 2000;
+      let lastCaptureAt = 0;
+      let inFlightSince = 0;
+      let capturePending = false;
+
+      const captureLoop = (now: number) => {
+        try {
+          if (ws.readyState !== WebSocket.OPEN) {
+            animationFrameRef.current = window.requestAnimationFrame(captureLoop);
+            return;
+          }
+
+          // FIX: BUG-09 — watchdog: release inFlight if the server never answered.
+          if (inFlightRef.current && inFlightSince > 0 && now - inFlightSince > INFLIGHT_WATCHDOG_MS) {
+            console.warn('[ai] inflight watchdog fired for', cameraId);
+            inFlightRef.current = false;
+            inFlightSince = 0;
+          }
+
+          if (now - lastCaptureAt < frameIntervalMs || inFlightRef.current || capturePending) {
+            animationFrameRef.current = window.requestAnimationFrame(captureLoop);
+            return;
+          }
+
+          const videoEl = document.querySelector(
+            `#video-mount-${cameraId} video`
+          ) as HTMLVideoElement | null;
+
+          if (!videoEl || videoEl.videoWidth === 0 || videoEl.videoHeight === 0) {
+            animationFrameRef.current = window.requestAnimationFrame(captureLoop);
+            return;
+          }
+
+          // Downscale to max 480p height, preserving aspect ratio
+          const scale = Math.min(1, MAX_HEIGHT / videoEl.videoHeight);
+          const w = Math.max(1, Math.round(videoEl.videoWidth * scale));
+          const h = Math.max(1, Math.round(videoEl.videoHeight * scale));
+          offscreen.width = w;
+          offscreen.height = h;
+          const ctx = offscreen.getContext('2d');
+          if (!ctx) {
+            animationFrameRef.current = window.requestAnimationFrame(captureLoop);
+            return;
+          }
+          ctx.drawImage(videoEl, 0, 0, w, h);
+          capturePending = true;
+          lastCaptureAt = now;
+          offscreen.toBlob((blob) => {
+            capturePending = false;
+            if (!blob || ws.readyState !== WebSocket.OPEN || inFlightRef.current) return;
+            inFlightRef.current = true;
+            inFlightSince = performance.now();
+            ws.send(blob);
+          }, 'image/jpeg', 0.45);
+        } catch (err) {
+          console.error('AI frame capture failed:', err);
+          setErrorMessage('AI frame capture failed.');
+        }
+        animationFrameRef.current = window.requestAnimationFrame(captureLoop);
+      };
+
+      animationFrameRef.current = window.requestAnimationFrame(captureLoop);
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        inFlightRef.current = false;
+        const data = normalizeAIResult(JSON.parse(event.data));
+        if (data.skipped) return;
+
+        if (data.error) {
+          const message = `AI unavailable: ${data.error}`;
+          setErrorMessage(message);
+          addSmartEvents([message]);
+          return;
+        }
+
+        setErrorMessage('');
+        if (!data.skipped) {
+          setResult(data);
+
+          // Add smart event descriptions
+          if (data.descriptions && data.descriptions.length > 0) {
+            const newEvents: SmartEvent[] = data.descriptions.map((text, i) => {
+              let severity: SmartEvent['severity'] = 'normal';
+              let type: SmartEvent['type'] = 'detection';
+              if (text.includes('🚨') || text.includes('FIGHTING') || text.includes('FALL')) {
+                severity = 'critical';
+                type = 'alert';
+              } else if (text.includes('⚠️') || text.includes('loitering')) {
+                severity = 'warning';
+                type = 'alert';
+              } else if (text.includes('Known person') || text.includes('Unknown person')) {
+                type = 'face';
+              }
+              return { id: `${Date.now()}-${i}`, text, severity, timestamp: Date.now(), type };
+            });
+            setSmartEvents(prev => [...newEvents, ...prev].slice(0, 100));
+          }
+        }
+      } catch (err) {
+        console.error('AI result parse failed:', err);
+        setErrorMessage('AI result parse failed.');
+      }
+    };
+
+    ws.onclose = () => {
+      inFlightRef.current = false;
+      setIsProcessing(false);
+    };
+    ws.onerror = () => {
+      inFlightRef.current = false;
+      setIsProcessing(false);
+      setErrorMessage('AI connection unavailable.');
+    };
+
+    return () => {
+      if (animationFrameRef.current) {
+        window.cancelAnimationFrame(animationFrameRef.current);
+      }
+      animationFrameRef.current = null;
+      inFlightRef.current = false;
+      ws.close();
+      wsRef.current = null;
+      setIsProcessing(false);
+      setErrorMessage('');
+    };
+  }, [cameraId, enabled, fps]);
+
+  return { result, isProcessing, errorMessage, smartEvents, canvasRef };
+}
+
+// ---- AI Overlay Canvas ----
+
+// Limb groups with colors for enhanced skeleton rendering
+const POSE_LIMB_GROUPS = [
+  // Torso — yellow
+  { connections: [[11, 12], [11, 23], [12, 24], [23, 24]], color: '#fbbf24', width: 3 },
+  // Left arm — orange
+  { connections: [[11, 13], [13, 15]], color: '#f97316', width: 3 },
+  // Right arm — orange
+  { connections: [[12, 14], [14, 16]], color: '#f97316', width: 3 },
+  // Left leg — cyan
+  { connections: [[23, 25], [25, 27]], color: '#22d3ee', width: 3 },
+  // Right leg — cyan
+  { connections: [[24, 26], [26, 28]], color: '#22d3ee', width: 3 },
+];
+
+// Activity label colors
+const ACTIVITY_COLORS: Record<string, string> = {
+  STANDING: '#4ade80',
+  SITTING: '#60a5fa',
+  LYING_DOWN: '#fbbf24',
+  CROUCHING: '#a78bfa',
+  ARMS_RAISED: '#f472b6',
+  RUNNING: '#34d399',
+  FALL: '#ef4444',
+  FIGHTING: '#ef4444',
+  UNKNOWN: '#94a3b8',
+};
+
+// FIX: BUG-02 — compute the actual painted content rectangle for a video
+// element rendered with `object-fit: contain`, so overlay coordinates align
+// with the pixels the user actually sees (not the letterbox bars).
+function computeContentRect(videoEl: HTMLVideoElement) {
+  const boxW = videoEl.clientWidth;
+  const boxH = videoEl.clientHeight;
+  const vw = videoEl.videoWidth;
+  const vh = videoEl.videoHeight;
+  if (boxW === 0 || boxH === 0 || vw === 0 || vh === 0) {
+    return { offsetX: 0, offsetY: 0, contentW: boxW, contentH: boxH };
+  }
+  const videoAR = vw / vh;
+  const boxAR = boxW / boxH;
+  if (videoAR > boxAR) {
+    // letterbox: black bars top+bottom
+    const contentW = boxW;
+    const contentH = contentW / videoAR;
+    return { offsetX: 0, offsetY: (boxH - contentH) / 2, contentW, contentH };
+  }
+  // pillarbox: black bars left+right
+  const contentH = boxH;
+  const contentW = contentH * videoAR;
+  return { offsetX: (boxW - contentW) / 2, offsetY: 0, contentW, contentH };
+}
+
+function AIOverlayCanvas({
+  cameraId,
+  aiResult,
+  displayMinVisibility
+}: {
+  cameraId: string;
+  aiResult: AIFrameResult | null;
+  displayMinVisibility: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    if (!aiResult || !canvasRef.current) return;
+
+    try {
+    const canvas = canvasRef.current;
+    const container = getCameraVideoMount(cameraId);
+    const videoEl = container?.querySelector('video') as HTMLVideoElement | null;
+
+    if (!videoEl || videoEl.videoWidth === 0 || videoEl.videoHeight === 0) return;
+
+    // FIX: BUG-12 — render at devicePixelRatio so skeleton lines stay crisp
+    // on HiDPI screens (previously aliased/soft).
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const cssW = videoEl.clientWidth;
+    const cssH = videoEl.clientHeight;
+    if (cssW === 0 || cssH === 0) return;
+    canvas.style.width = `${cssW}px`;
+    canvas.style.height = `${cssH}px`;
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    // FIX: BUG-02 — map AI-frame pixel coords into the actual video content
+    // rect (ignoring letterbox bars). Without this the skeleton drifts into
+    // the black side-bars and appears to "float" off the body.
+    const rect = computeContentRect(videoEl);
+    const sourceWidth = aiResult.frame_width || videoEl.videoWidth;
+    const sourceHeight = aiResult.frame_height || videoEl.videoHeight;
+    if (sourceWidth === 0 || sourceHeight === 0) return;
+    const scaleX = rect.contentW / sourceWidth;
+    const scaleY = rect.contentH / sourceHeight;
+    const toCanvasX = (x: number) => rect.offsetX + x * scaleX;
+    const toCanvasY = (y: number) => rect.offsetY + y * scaleY;
+
+    const poses = Array.isArray(aiResult.poses) ? aiResult.poses : [];
+
+    // Draw enhanced pose skeletons with limb-specific colors
+    for (let poseIdx = 0; poseIdx < poses.length; poseIdx++) {
+      const pose = poses[poseIdx];
+      if (!pose || pose.length === 0) continue;
+
+      // Draw limb connections with group-specific colors
+      for (const group of POSE_LIMB_GROUPS) {
+        ctx.strokeStyle = group.color;
+        ctx.lineWidth = group.width;
+        ctx.lineCap = 'round';
+
+        for (const [a, b] of group.connections) {
+          if (a < pose.length && b < pose.length
+            && pose[a].visibility > displayMinVisibility
+            && pose[b].visibility > displayMinVisibility) {
+            ctx.beginPath();
+            ctx.moveTo(toCanvasX(pose[a].x), toCanvasY(pose[a].y));
+            ctx.lineTo(toCanvasX(pose[b].x), toCanvasY(pose[b].y));
+            ctx.stroke();
+          }
+        }
+      }
+
+      // Draw joint dots with confidence-scaled radius (Phase 3 heatmap-lite).
+      for (const kp of pose) {
+        if (kp.visibility > displayMinVisibility) {
+          const px = toCanvasX(kp.x);
+          const py = toCanvasY(kp.y);
+          // Higher visibility = bigger, brighter dot.
+          const conf = Math.min(1, Math.max(0, kp.visibility));
+          const baseR = 2 + conf * 2.5;
+
+          // Outer glow
+          ctx.beginPath();
+          ctx.arc(px, py, baseR + 2, 0, 2 * Math.PI);
+          ctx.fillStyle = `rgba(255, 255, 255, ${0.15 + conf * 0.25})`;
+          ctx.fill();
+
+          // Inner dot
+          ctx.beginPath();
+          ctx.arc(px, py, baseR, 0, 2 * Math.PI);
+          ctx.fillStyle = '#ffffff';
+          ctx.fill();
+
+          // Dark border for contrast
+          ctx.beginPath();
+          ctx.arc(px, py, baseR, 0, 2 * Math.PI);
+          ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+      }
+
+    }
+    } catch (err) {
+      console.error('AI overlay render failed:', err);
+    }
+  }, [aiResult, cameraId, displayMinVisibility]);
+
+  return <canvas ref={canvasRef} className="ai-overlay-canvas" />;
+}
+
+// ---- AI Control Panel ----
+
+function AIControlPanel({
+  settings, onUpdate
+}: { settings: AISettingsData; onUpdate: (s: AISettingsData) => void }) {
+  type AISettingToggleKey =
+    | 'enabled'
+    | 'pose_enabled'
+    | 'enhancement_enabled'
+    | 'motion_gating';
+
+  const toggle = (key: AISettingToggleKey) => {
+    onUpdate({ ...settings, [key]: !settings[key] });
+  };
+
+  return (
+    <div className="ai-control-panel">
+      <div className="card-title">
+        Pose Estimation
+        <span className="ai-section-header">
+          <span className="ai-badge">LOCAL</span>
+        </span>
+      </div>
+
+      <div className="ai-controls-grid">
+        <div className="ai-toggle-item">
+          <label>Pose System</label>
+          <button className={`ai-toggle ${settings.enabled ? 'active' : ''}`}
+            onClick={() => toggle('enabled')} />
+        </div>
+        <div className="ai-toggle-item">
+          <label>Pose Detection</label>
+          <button className={`ai-toggle ${settings.pose_enabled ? 'active' : ''}`}
+            onClick={() => toggle('pose_enabled')} />
+        </div>
+        <div className="ai-toggle-item">
+          <label>Night Vision</label>
+          <button className={`ai-toggle ${settings.enhancement_enabled ? 'active' : ''}`}
+            onClick={() => toggle('enhancement_enabled')} />
+        </div>
+        <div className="ai-toggle-item">
+          <label>Motion Gate</label>
+          <button className={`ai-toggle ${settings.motion_gating ? 'active' : ''}`}
+            onClick={() => toggle('motion_gating')} />
+        </div>
+      </div>
+
+      <div className="ai-fps-control" style={{ marginTop: 10 }}>
+        <label>Frame Rate</label>
+        {/* FIX: BUG-07 — slider max 5 → 30 FPS for real-time surveillance. */}
+        <input type="range" className="ai-fps-slider" min={1} max={30} step={1}
+          value={settings.fps}
+          onChange={e => onUpdate({ ...settings, fps: Number(e.target.value) })} />
+        <span className="ai-fps-value">{settings.fps} FPS</span>
+      </div>
+
+      <div className="ai-fps-control" style={{ marginTop: 10 }}>
+        <label title="MediaPipe detection threshold — frames below this do not produce a pose">
+          Detection Confidence
+        </label>
+        {/* FIX: BUG-08 — this slider now actually reaches MediaPipe. */}
+        <input type="range" className="ai-fps-slider" min={0.1} max={0.9} step={0.05}
+          value={settings.detection_confidence}
+          onChange={e => onUpdate({
+            ...settings,
+            detection_confidence: Number(e.target.value),
+            confidence_threshold: Number(e.target.value),
+          })} />
+        <span className="ai-fps-value">{Math.round(settings.detection_confidence * 100)}%</span>
+      </div>
+
+      <div className="ai-fps-control" style={{ marginTop: 10 }}>
+        <label title="Only joints above this visibility are drawn on the overlay">
+          Display Visibility
+        </label>
+        {/* FIX: BUG-04 — this filter is frontend-only (render) and is separate
+            from the MediaPipe detection threshold above. 30% is a sane default
+            that keeps lower-body joints visible. */}
+        <input type="range" className="ai-fps-slider" min={0.1} max={0.9} step={0.05}
+          value={settings.display_min_visibility ?? 0.3}
+          onChange={e => onUpdate({
+            ...settings,
+            display_min_visibility: Number(e.target.value),
+          })} />
+        <span className="ai-fps-value">
+          {Math.round((settings.display_min_visibility ?? 0.3) * 100)}%
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ---- Known Persons Section ----
+
+function KnownPersonsSection() {
+  const [faces, setFaces] = useState<KnownFace[]>([]);
+  const [showAdd, setShowAdd] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newFile, setNewFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+
+  useEffect(() => { getKnownFaces().then(setFaces).catch(() => {}); }, []);
+
+  const handleUpload = async () => {
+    if (!newName.trim() || !newFile) return;
+    setUploading(true);
+    try {
+      await uploadKnownFace(newName.trim(), newFile);
+      setShowAdd(false);
+      setNewName('');
+      setNewFile(null);
+      const updated = await getKnownFaces();
+      setFaces(updated);
+    } catch (e) { console.error('Upload failed:', e); }
+    setUploading(false);
+  };
+
+  const handleDelete = async (name: string) => {
+    try {
+      await deleteKnownFace(name);
+      setFaces(prev => prev.filter(f => f.name !== name));
+    } catch (e) { console.error('Delete failed:', e); }
+  };
+
+  return (
+    <section className="known-persons-section card">
+      <div className="card-title">
+        <span>👤 Known Persons</span>
+        <button className="btn-ghost" onClick={() => setShowAdd(!showAdd)}>
+          {showAdd ? 'Cancel' : '+ Add Person'}
+        </button>
+      </div>
+
+      {showAdd && (
+        <div className="add-person-modal">
+          <input type="text" placeholder="Person name..." value={newName}
+            onChange={e => setNewName(e.target.value)} />
+          <input type="file" accept="image/*"
+            onChange={e => setNewFile(e.target.files?.[0] || null)} />
+          <div className="modal-actions">
+            <button className="btn-primary" onClick={handleUpload}
+              disabled={uploading || !newName.trim() || !newFile}>
+              {uploading ? 'Uploading...' : 'Save'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="known-persons-grid">
+        {faces.map(face => (
+          <div className="known-person-card" key={face.name}>
+            <div className="known-person-avatar">
+              {face.name.charAt(0).toUpperCase()}
+            </div>
+            <div className="known-person-name">{face.name}</div>
+            <div className="known-person-meta">{face.image_count} photo(s)</div>
+            <div className="known-person-actions">
+              <button className="btn-ghost" onClick={() => handleDelete(face.name)}>
+                Remove
+              </button>
+            </div>
+          </div>
+        ))}
+        {faces.length === 0 && !showAdd && (
+          <div className="add-person-form" onClick={() => setShowAdd(true)}>
+            <span className="add-icon">+</span>
+            <span>Add known person</span>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// ---- Smart Event Log ----
+
+function SmartEventLog({ events }: { events: SmartEvent[] }) {
+  const [filter, setFilter] = useState<'all' | 'detection' | 'face' | 'alert'>('all');
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const filtered = filter === 'all' ? events : events.filter(e => e.type === filter);
+
+  const getIcon = (e: SmartEvent) => {
+    if (e.severity === 'critical') return '🚨';
+    if (e.severity === 'warning') return '⚠️';
+    if (e.type === 'face') return '👤';
+    return '📷';
+  };
+
+  return (
+    <section className="smart-event-log card">
+      <div className="card-title">
+        <span>📋 AI Event Log</span>
+        <span className="badge badge-ai-detection">{events.length} events</span>
+      </div>
+
+      <div className="event-filter-bar">
+        {(['all', 'detection', 'face', 'alert'] as const).map(f => (
+          <button key={f}
+            className={`event-filter-btn ${filter === f ? 'active' : ''}`}
+            onClick={() => setFilter(f)}>
+            {f.charAt(0).toUpperCase() + f.slice(1)}
+          </button>
+        ))}
+      </div>
+
+      <div className="smart-event-list" ref={listRef}>
+        {filtered.length === 0 && (
+          <div className="status-message">No AI events yet. Start viewing a camera feed to begin detection.</div>
+        )}
+        {filtered.slice(0, 50).map(e => (
+          <div key={e.id} className={`smart-event-item severity-${e.severity}`}>
+            <span className="event-icon">{getIcon(e)}</span>
+            <span className="event-text">{e.text}</span>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function Dashboard() {
-  const { cameras, message, cameraLastUpdated, getCameraStatus, viewCamera, viewAllCameras } =
+  const { cameras, message, cameraLastUpdated, activeCameraIds, getCameraStatus, viewCamera, viewAllCameras } =
     useCameraViewer();
+  const [aiEnabled, setAiEnabled] = useState(true);
+  const [aiSettings, setAiSettings] = useState<AISettingsData>({
+    enabled: true,
+    fps: 15,                        // FIX: BUG-07 — raise default target FPS
+    pose_enabled: true,
+    enhancement_enabled: true,
+    motion_gating: true,
+    detection_confidence: 0.5,       // FIX: BUG-08 — what MediaPipe actually uses
+    confidence_threshold: 0.5,       // legacy alias kept in sync
+    display_min_visibility: 0.3,     // FIX: BUG-04 — no more hidden lower body
+  });
+
+  // AI detection for each camera
+  const cam1AI = useAIDetection(
+    'camera-1',
+    aiEnabled && aiSettings.enabled && activeCameraIds.includes('camera-1'),
+    aiSettings.fps
+  );
+  const cam2AI = useAIDetection(
+    'camera-2',
+    aiEnabled && aiSettings.enabled && activeCameraIds.includes('camera-2'),
+    aiSettings.fps
+  );
+  const aiResults: Record<string, ReturnType<typeof useAIDetection>> = {
+    'camera-1': cam1AI, 'camera-2': cam2AI,
+  };
+
+  // Combine smart events from all cameras
+  const allSmartEvents = useMemo(() => {
+    return [...cam1AI.smartEvents, ...cam2AI.smartEvents]
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, 100);
+  }, [cam1AI.smartEvents, cam2AI.smartEvents]);
+
+  // Load AI settings on mount. Preserve the frontend-only display slider
+  // and backfill detection_confidence from the legacy confidence_threshold
+  // if the server has not been restarted yet.
+  useEffect(() => {
+    getAISettings()
+      .then((server) => {
+        setAiSettings((prev) => ({
+          ...prev,
+          ...server,
+          detection_confidence:
+            server.detection_confidence ??
+            server.confidence_threshold ??
+            prev.detection_confidence,
+          display_min_visibility: prev.display_min_visibility,
+        }));
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleAISettingsUpdate = (newSettings: AISettingsData) => {
+    setAiSettings(newSettings);
+    updateAISettings(newSettings).catch(() => {});
+  };
 
   return (
     <AppShell
@@ -422,7 +1163,7 @@ function Dashboard() {
       <PageHeader
         kicker="Private monitoring dashboard"
         title="All Cameras"
-        subtitle="Live feeds are available only through authenticated Tailscale access."
+        subtitle="Live feeds with pose-estimation skeleton overlays."
         actions={
           <>
             <div className="search">
@@ -454,39 +1195,94 @@ function Dashboard() {
           <div className="status-line">
             <strong>Registration:</strong> Disabled
           </div>
+
+          {/* Phase 3 — live per-camera pipeline metrics */}
+          <div className="status-line" style={{ marginTop: 8 }}>
+            <strong>Pose model:</strong>{' '}
+            {cam1AI.result?.model || cam2AI.result?.model || 'MediaPipe BlazePose (loading)'}
+          </div>
+          <div className="status-line">
+            <strong>Target FPS:</strong> {aiSettings.fps}
+          </div>
+          {cameras.map((camera) => {
+            const r = aiResults[camera.id]?.result;
+            const active = activeCameraIds.includes(camera.id);
+            return (
+              <div className="status-line" key={`status-${camera.id}`}>
+                <strong>{camera.name}:</strong>{' '}
+                {active
+                  ? `${(r?.ai_fps ?? 0).toFixed(1)} FPS · ${
+                      r?.processing_ms ? Math.round(r.processing_ms) : 0
+                    } ms · ${r?.person_count ?? 0} person${(r?.person_count ?? 0) === 1 ? '' : 's'}`
+                  : 'idle'}
+              </div>
+            );
+          })}
         </div>
 
-        <div className="card">
-          <div className="card-title">Security controls</div>
-          <div className="status-line">Identity headers verified</div>
-          <div className="status-line">Camera grants enforced</div>
-          <div className="status-line">Short-lived stream tokens</div>
-        </div>
+        <AIControlPanel settings={aiSettings} onUpdate={handleAISettingsUpdate} />
       </section>
 
       <section className="cam-grid" aria-label="Live camera feeds">
         {cameras.map((camera) => {
           const status = getCameraStatus(camera);
+          const cameraAI = aiResults[camera.id];
+          const poseDetected = Boolean(cameraAI?.result?.poses?.some((pose) => pose.length > 0));
+          const hasAlerts = false;
 
           return (
             <article className="cam-card active" key={camera.id}>
-              <section
-                id={`video-container-${camera.id}`}
-                className="cam-feed"
-                aria-label={`${camera.name} live feed`}
-              >
-                <div className="rec-pill">
-                  <span className={status === 'live' ? 'live-dot' : 'alert-dot'} />
-                  {status === 'live' ? 'LIVE' : status.toUpperCase()}
-                </div>
+              <div className="cam-feed" style={{ position: 'relative' }}>
+                <section
+                  id={`video-container-${camera.id}`}
+                  style={{ width: '100%', height: '100%' }}
+                  aria-label={`${camera.name} live feed`}
+                >
+                  <div className="rec-pill">
+                    <span className={status === 'live' ? 'live-dot' : 'alert-dot'} />
+                    {status === 'live' ? 'LIVE' : status.toUpperCase()}
+                  </div>
 
-                <span className="feed-placeholder">NO FEED SELECTED</span>
-              </section>
+                  {cameraAI?.isProcessing && (
+                    <div className="ai-processing-pill">
+                      <span className="ai-dot" />
+                      AI {cameraAI.result?.processing_ms ? `${Math.round(cameraAI.result.processing_ms)}ms` : '...'}
+                      {cameraAI.result?.ai_fps ? ` / ${cameraAI.result.ai_fps.toFixed(1)} FPS` : ''}
+                    </div>
+                  )}
+
+                  <div
+                    id={`video-mount-${camera.id}`}
+                    className="video-mount"
+                    aria-hidden="true"
+                  />
+                  <span className="feed-placeholder">NO FEED SELECTED</span>
+                </section>
+
+                {/* AI overlay canvas stays outside the LiveKit video mount. */}
+                <AIOverlayCanvas
+                  cameraId={camera.id}
+                  aiResult={cameraAI?.result || null}
+                  displayMinVisibility={aiSettings.display_min_visibility ?? 0.3}
+                />
+              </div>
 
               <div className="cam-meta">
                 <span className="cam-name">{camera.name}</span>
                 <span className={getCameraStatusBadgeClass(status)}>{status}</span>
+                <span className={poseDetected ? 'badge badge-ai-detection' : 'badge badge-offline'}>
+                  {poseDetected ? 'pose detected' : 'no pose'}
+                </span>
+                {hasAlerts && (
+                  <span className="badge badge-ai-alert">
+                    ⚠ Alert
+                  </span>
+                )}
               </div>
+
+              {cameraAI?.errorMessage && (
+                <div className="cam-ts">AI unavailable: {cameraAI.errorMessage}</div>
+              )}
 
               <div className="cam-ts">
                 Last updated: {cameraLastUpdated[camera.id] || 'Not connected'}
@@ -504,6 +1300,7 @@ function Dashboard() {
           );
         })}
       </section>
+
     </AppShell>
   );
 }
@@ -661,6 +1458,11 @@ function DemoPage() {
                       {status === 'live' ? 'LIVE' : status.toUpperCase()}
                     </div>
 
+                    <div
+                      id={`video-mount-${camera.id}`}
+                      className="video-mount"
+                      aria-hidden="true"
+                    />
                     <span className="feed-placeholder">NO FEED SELECTED</span>
                   </section>
 
@@ -809,14 +1611,13 @@ function Publisher() {
 
       trackRef.current = track;
 
-      const preview = document.getElementById('publisher-preview');
+      const preview = getPublisherVideoMount();
       if (preview) {
-        preview.innerHTML = '';
         const el = track.attach();
         el.muted = true;
         el.autoplay = true;
         el.setAttribute('playsinline', 'true');
-        preview.appendChild(el);
+        preview.replaceChildren(el);
       }
 
       setMessage('Camera permission granted. Connecting to LiveKit...');
@@ -855,6 +1656,18 @@ function Publisher() {
       console.error('Publishing failed:', err);
       const errorMessage = err instanceof Error ? err.message : String(err);
       hasPublishedRef.current = false;
+      if (trackRef.current) {
+        trackRef.current.stop();
+        trackRef.current.detach().forEach((el) => el.remove());
+        trackRef.current = null;
+      }
+      if (roomRef.current) {
+        intentionalStopRef.current = true;
+        roomRef.current.disconnect();
+        roomRef.current = null;
+        intentionalStopRef.current = false;
+      }
+      clearPublisherVideoMount();
       await logPublisherEvent('publisher_failed', errorMessage);
       setMessage(`Publishing failed: ${errorMessage}`);
     }
@@ -874,10 +1687,7 @@ function Publisher() {
       intentionalStopRef.current = false;
     }
 
-    const preview = document.getElementById('publisher-preview');
-    if (preview) {
-      preview.innerHTML = '';
-    }
+    clearPublisherVideoMount();
 
     if (hasPublishedRef.current) {
       void logPublisherEvent('publisher_stopped', 'Publisher stopped by user.');
@@ -938,6 +1748,7 @@ function Publisher() {
           <span className="badge badge-info">{cameraId}</span>
         </div>
         <div id="publisher-preview" className="publisher-preview" aria-label="Phone camera preview">
+          <div id="publisher-video-mount" className="video-mount" aria-hidden="true" />
           <span className="feed-placeholder">PREVIEW NOT STARTED</span>
         </div>
       </section>
@@ -1525,4 +2336,8 @@ function App() {
   return <Dashboard />;
 }
 
-createRoot(document.getElementById('root')!).render(<App />);
+createRoot(document.getElementById('root')!).render(
+  <AppErrorBoundary>
+    <App />
+  </AppErrorBoundary>
+);

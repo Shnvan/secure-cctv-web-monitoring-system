@@ -76,9 +76,11 @@ Install these prerequisites:
 - Python 3.12 if running the backend outside Docker
 - Tailscale for private-device demo access
 
-Create a local `.env` from your private deployment values, or restore the project `private local configuration` template if it is available in your checkout. The `.env` file must stay local and private.
+Create a local `.env` from your private deployment values. The `.env` file must stay local and private.
 
-Do not commit `.env`. Do not paste real API secrets, Tailscale keys, database passwords, LiveKit secrets, camera credentials, or stream tokens into documentation, screenshots, issues, or commits.
+Create a local `infra/livekit.yaml` with LiveKit key settings that match your private local environment. The real `infra/livekit.yaml` file must stay local and private.
+
+Do not commit `.env`, `infra/livekit.yaml`, known-face images, API secrets, Tailscale keys, database passwords, LiveKit secrets, camera credentials, or stream tokens into documentation, screenshots, issues, or commits.
 
 Useful local URLs after Docker Compose starts:
 
@@ -187,7 +189,7 @@ Do not show `.env`, API secrets, private keys, raw LiveKit tokens, camera creden
 ## Limitations / Future Work
 
 - Demo users and audit events are currently starter in-memory backend data; production should persist users, roles, grants, token records, and audit events in PostgreSQL.
-- `private local configuration` is not present in this checkout; restore or recreate a sanitized template before distributing the project.
+- Local deployment values are intentionally not distributed with the repository.
 - Tailscale Serve is suitable for a small private demo, not a complete enterprise CCTV deployment by itself.
 - Production should add durable audit export, backups, monitoring, alerting, incident response procedures, and host hardening.
 - Production should use managed identity, phishing-resistant MFA, device posture checks, and formal access reviews.
@@ -223,10 +225,6 @@ Use an identity with the required admin or auditor role. The backend only allows
 ### Audit logs are empty
 
 Generate activity first. For example, view a camera, start or stop a publisher, request a stream token, or use `/admin/security-test` to create the simulated denied-access audit event.
-
-### `private local configuration` is missing
-
-Create a local `.env` from private deployment values or restore a sanitized project template. Keep `.env` private and local. Never commit `.env`.
 
 ### GitHub Actions security checks fail
 

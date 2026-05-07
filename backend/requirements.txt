@@ -5,3 +5,11 @@ PyJWT[crypto]==2.12.0
 livekit-api==0.8.2
 httpx==0.28.1
 pytest==9.0.3
+python-multipart==0.0.20
+ultralytics==8.3.145
+mediapipe==0.10.21
+deepface==0.0.93
+opencv-python-headless==4.11.0.86
+onnxruntime>=1.17.0
+numpy>=1.26.0,<2.0.0
+tf-keras==2.19.0

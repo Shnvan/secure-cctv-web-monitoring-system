@@ -4,17 +4,23 @@ import csv
 from datetime import datetime, timedelta, timezone
 import hashlib
 from io import StringIO
+import json
+import logging
 import uuid
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
 from .audit import audit_logger
 from .auth import get_current_principal, require_camera_grant, require_role, USERS
-from .models import Camera, Principal, PublisherEventRequest, TokenRequest, TokenResponse
+from .models import Camera, Principal, PublisherEventRequest, TokenRequest, TokenResponse, AISettings
 from .security_headers import SecurityHeadersMiddleware
 from .settings import settings
+from .ai.pipeline import ai_processor
+from .ai.face_recognition import get_face_recognizer
+
+logger = logging.getLogger(__name__)
 
 try:
     from livekit import api as livekit_api
@@ -27,9 +33,16 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in settings.allowed_origins.split(',') if origin.strip()],
     allow_credentials=True,
-    allow_methods=['GET', 'POST', 'PATCH'],
+    allow_methods=['GET', 'POST', 'PATCH', 'DELETE'],
     allow_headers=['authorization', 'content-type', 'cf-access-jwt-assertion', 'x-request-id'],
 )
+
+# Initialize AI processor settings from env
+ai_processor.update_settings({
+    'enabled': settings.ai_enabled,
+    'fps': settings.ai_fps,
+    'confidence_threshold': settings.ai_confidence_threshold,
+})
 
 CAMERAS: dict[str, Camera] = {
     'camera-1': Camera(id='camera-1', name='Camera 1 - Phone Source', room='camera-1-room', status='offline'),
@@ -325,6 +338,259 @@ def security_test_denied_access(
         'status': 'logged',
         'message': 'Simulated denied-access event was written to the audit log.',
     }
+
+# ---- AI WebSocket Endpoint ----
+
+def _ws_authenticate(proxy_secret: str | None, identity_header_value: str | None) -> Principal | None:
+    """Validate WebSocket connection using the same trusted-proxy logic as REST."""
+    if not proxy_secret or proxy_secret != settings.trusted_proxy_secret:
+        return None
+    email = identity_header_value
+    if not email:
+        return None
+    user = USERS.get(email)
+    if not user or user.disabled:
+        return None
+    return user
+
+
+@app.websocket('/ws/ai/camera/{camera_id}')
+async def ws_ai_camera(websocket: WebSocket, camera_id: str) -> None:
+    """WebSocket endpoint for real-time AI frame processing.
+
+    Frontend sends base64-encoded JPEG frames; backend returns detection JSON.
+    Authentication uses the same proxy secret injected by Caddy.
+    """
+    # Authenticate via headers (Caddy injects x-internal-auth-secret)
+    proxy_secret = websocket.headers.get('x-internal-auth-secret')
+    identity_email = websocket.headers.get(
+        settings.trusted_identity_header.lower().replace('_', '-'),
+        websocket.headers.get('tailscale-user-login'),
+    )
+
+    # Also support dev auth for development
+    if settings.dev_auth_enabled and settings.environment == 'dev':
+        dev_user = websocket.headers.get('x-dev-user')
+        if dev_user and dev_user in USERS:
+            principal = USERS[dev_user]
+        else:
+            principal = _ws_authenticate(proxy_secret, identity_email)
+    else:
+        principal = _ws_authenticate(proxy_secret, identity_email)
+
+    if principal is None:
+        await websocket.close(code=4001, reason='Unauthorized')
+        return
+
+    # Check camera access
+    if camera_id not in CAMERAS:
+        await websocket.close(code=4004, reason='Camera not found')
+        return
+
+    camera = CAMERAS[camera_id]
+    user_grants = principal.camera_grants.get(camera_id, [])
+    if 'view' not in user_grants and 'manage' not in user_grants:
+        await websocket.close(code=4003, reason='Access denied')
+        return
+
+    await websocket.accept()
+    logger.info('AI WebSocket connected: user=%s camera=%s', principal.email, camera_id)
+    # FIX: BUG-01 — ensure this camera starts with a clean MediaPipe instance
+    # and smoother state, even if a previous session left something behind.
+    ai_processor.reset_camera(camera_id)
+
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get('type') == 'websocket.disconnect':
+                break
+
+            data = message.get('bytes')
+            if data is None:
+                data = message.get('text')
+            if data is None:
+                await websocket.send_text(json.dumps({
+                    'detections': [],
+                    'poses': [],
+                    'faces': [],
+                    'alerts': [],
+                    'descriptions': [],
+                    'pose_connections': [],
+                    'timestamp': datetime.now(timezone.utc).timestamp(),
+                    'camera_id': camera_id,
+                    'processing_ms': 0,
+                    'error': 'Empty frame payload',
+                }))
+                continue
+
+            # FIX: BUG-06 — run MediaPipe in the AI thread pool so the event
+            # loop stays free for the other camera's WebSocket.
+            result = await ai_processor.process_frame_async(
+                frame_data=data,
+                camera_id=camera_id,
+                camera_name=camera.name,
+            )
+
+            # Log significant AI events to audit system (rate-limited)
+            alerts = result.get('alerts', [])
+            if alerts and ai_processor.should_log_alert():
+                for alert in alerts:
+                    audit_logger.log(
+                        action=f'AI_{alert["alert_type"].upper()}_DETECTED',
+                        result='success',
+                        actor_email=principal.email,
+                        actor_roles=list(principal.roles),
+                        target_type='camera',
+                        target_id=camera_id,
+                        metadata={
+                            'alert_type': alert['alert_type'],
+                            'severity': alert['severity'],
+                            'smart_description': alert.get('description', ''),
+                        },
+                    )
+
+            descriptions = result.get('descriptions', [])
+            if descriptions and ai_processor.should_log_event(camera_id):
+                det_count = len(result.get('detections', []))
+                face_count = len(result.get('faces', []))
+                audit_logger.log(
+                    action='AI_DETECTION',
+                    result='success',
+                    actor_email=principal.email,
+                    actor_roles=list(principal.roles),
+                    target_type='camera',
+                    target_id=camera_id,
+                    metadata={
+                        'detection_count': det_count,
+                        'face_count': face_count,
+                        'smart_description': descriptions[0] if descriptions else '',
+                    },
+                )
+
+            await websocket.send_text(json.dumps(result))
+    except WebSocketDisconnect:
+        logger.info('AI WebSocket disconnected: user=%s camera=%s', principal.email, camera_id)
+    except Exception as exc:
+        logger.error('AI WebSocket error: %s', exc)
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+
+
+# ---- AI REST API Endpoints ----
+
+@app.get('/api/v1/ai/known-faces')
+def list_known_faces(
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> list[dict]:
+    """List all known persons in the face recognition database."""
+    face_rec = get_face_recognizer(settings.known_faces_dir, settings.ai_face_model)
+    return face_rec.list_known_faces()
+
+
+@app.post('/api/v1/ai/known-faces')
+async def add_known_face(
+    request: Request,
+    name: str,
+    file: UploadFile = File(...),
+    principal: Principal = Depends(get_current_principal),
+) -> dict:
+    """Upload a new known person face image. Admin only."""
+    require_role(principal, {'super_admin', 'security_admin'})
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail='No file provided')
+
+    image_bytes = await file.read()
+    if len(image_bytes) > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(status_code=400, detail='File too large')
+
+    face_rec = get_face_recognizer(settings.known_faces_dir, settings.ai_face_model)
+    result = face_rec.add_known_face(name, image_bytes, file.filename)
+
+    audit_logger.log(
+        action='AI_KNOWN_FACE_ADDED',
+        result='success',
+        actor_email=principal.email,
+        actor_roles=list(principal.roles),
+        target_type='known_face',
+        target_id=name,
+        source_ip=client_ip(request),
+        user_agent=request.headers.get('user-agent'),
+        request_id=request.headers.get('x-request-id'),
+    )
+
+    return result
+
+
+@app.delete('/api/v1/ai/known-faces/{name}')
+def remove_known_face(
+    request: Request,
+    name: str,
+    principal: Principal = Depends(get_current_principal),
+) -> dict:
+    """Remove a known person from the face recognition database. Admin only."""
+    require_role(principal, {'super_admin', 'security_admin'})
+
+    face_rec = get_face_recognizer(settings.known_faces_dir, settings.ai_face_model)
+    removed = face_rec.remove_known_face(name)
+
+    if not removed:
+        raise HTTPException(status_code=404, detail='Person not found')
+
+    audit_logger.log(
+        action='AI_KNOWN_FACE_REMOVED',
+        result='success',
+        actor_email=principal.email,
+        actor_roles=list(principal.roles),
+        target_type='known_face',
+        target_id=name,
+        source_ip=client_ip(request),
+        user_agent=request.headers.get('user-agent'),
+        request_id=request.headers.get('x-request-id'),
+    )
+
+    return {'status': 'removed', 'name': name}
+
+
+@app.get('/api/v1/ai/settings')
+def get_ai_settings(
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> dict:
+    """Get current AI processing settings."""
+    return ai_processor.get_settings()
+
+
+@app.post('/api/v1/ai/settings')
+def update_ai_settings(
+    request: Request,
+    body: AISettings,
+    principal: Principal = Depends(get_current_principal),
+) -> dict:
+    """Update AI processing settings. Admin only."""
+    require_role(principal, {'super_admin', 'security_admin'})
+
+    updated_fields = body.model_dump(exclude_unset=True)
+    new_settings = ai_processor.update_settings(updated_fields)
+
+    audit_logger.log(
+        action='AI_SETTINGS_CHANGED',
+        result='success',
+        actor_email=principal.email,
+        actor_roles=list(principal.roles),
+        target_type='ai_settings',
+        target_id='global',
+        source_ip=client_ip(request),
+        user_agent=request.headers.get('user-agent'),
+        request_id=request.headers.get('x-request-id'),
+        metadata={'new_settings': updated_fields},
+    )
+
+    return new_settings
+
 
 @app.get('/{path:path}', include_in_schema=False)
 def catch_all(path: str) -> dict[str, str]:

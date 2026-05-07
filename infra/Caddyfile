@@ -14,6 +14,12 @@
         reverse_proxy livekit:7880
     }
 
+    handle /ws/* {
+        reverse_proxy backend:8000 {
+            header_up x-internal-auth-secret {$TRUSTED_PROXY_SECRET}
+        }
+    }
+
     handle /api/* {
         reverse_proxy backend:8000 {
             header_up x-internal-auth-secret {$TRUSTED_PROXY_SECRET}
